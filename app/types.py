@@ -1,4 +1,4 @@
-"""Only the domain types used by the foundation."""
+"""Domain types for projects and persisted workspace inputs."""
 
 from datetime import datetime
 
@@ -22,3 +22,35 @@ class Project(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+
+OUTPUT_FORMATS = (
+    'LinkedIn post', 'X post/thread', 'Reddit post', 'Slack/Discord message',
+    'Newsletter', 'Blog/article', 'Email', 'Executive summary', 'Research summary',
+    'Strategy memo', 'Technical documentation', 'Plain answer', 'Custom',
+)
+
+
+class Source(BaseModel):
+    id: int
+    project_id: int
+    type: str
+    title: str
+    content: str
+    original_url: str | None
+    final_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class Response(BaseModel):
+    id: int
+    project_id: int
+    text: str
+    origin: str
+    kind: str
+    run_request_id: int | None
+    verified_provider: str | None
+    verified_model: str | None
+    claimed_provider: str | None
+    claimed_model: str | None
+    created_at: datetime
