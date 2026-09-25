@@ -53,4 +53,36 @@ class Response(BaseModel):
     verified_model: str | None
     claimed_provider: str | None
     claimed_model: str | None
+    finish_reason: str | None = None
+    generation_metadata_json: str = "{}"
     created_at: datetime
+
+
+class Run(BaseModel):
+    id: int
+    project_id: int
+    operation: str
+    status: str
+    prompt_version: str
+    input_snapshot_json: str
+    parameters_json: str
+    estimated_cost_usd: float | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class RunRequest(BaseModel):
+    id: int
+    project_id: int
+    run_id: int
+    requested_model: str
+    status: str
+    error_message: str | None
+    provider_request_id: str | None
+    input_tokens: int | None
+    output_tokens: int | None
+    cost_usd: float | None
+    latency_ms: int | None
+    created_at: datetime
+    completed_at: datetime | None
+    response: Response | None = None

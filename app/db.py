@@ -1,12 +1,16 @@
 """Small SQLite initialization and input workspace persistence functions."""
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
-from app.types import OUTPUT_FORMATS, Project, ProjectCreate, Response, Source
+from app.types import OUTPUT_FORMATS, Project, ProjectCreate, Response, Run, RunRequest, Source
+
+if TYPE_CHECKING:
+    from app.openrouter import Completion
 
 SCHEMA_VERSION = 1
 
@@ -149,3 +153,117 @@ def list_manual_responses(database_path: Path, project_id: int) -> list[Response
     with connect(database_path) as connection:
         rows = connection.execute("SELECT * FROM responses WHERE project_id = ? AND origin = 'manual' ORDER BY id", (project_id,)).fetchall()
         return [Response.model_validate(dict(row)) for row in rows]
+
+
+def generation_inputs(database_path: Path, project_id: int) -> dict[str, Any]:
+    """Read all prompt inputs in one SQLite snapshot, not from UI state."""
+    with connect(database_path) as connection:
+        connection.execute('BEGIN')
+        row = connection.execute('SELECT * FROM projects WHERE id = ?', (project_id,)).fetchone()
+        if row is None:
+            raise ValueError('Project no longer exists.')
+        sources = connection.execute('SELECT * FROM sources WHERE project_id = ? ORDER BY id', (project_id,)).fetchall()
+        return {
+            'project_id': project_id, 'project_name': row['name'], 'task': row['task'],
+            'additional_instructions': row['additional_instructions'],
+            'output_format': row['output_format'], 'custom_output_format': row['custom_output_format'],
+            'sources': [dict(source) for source in sources],
+        }
+
+
+def create_generation_run(database_path: Path, snapshot: dict, parameters: dict,
+                          prompt_version: str, estimated_cost: float | None) -> int:
+    now = datetime.now(UTC).isoformat()
+    project_id = snapshot['project_id']
+    with connect(database_path) as connection:
+        cursor = connection.execute(
+            "INSERT INTO runs (project_id, operation, status, prompt_version, input_snapshot_json, parameters_json, estimated_cost_usd, created_at) "
+            "VALUES (?, 'generation', 'pending', ?, ?, ?, ?, ?)",
+            (project_id, prompt_version, json.dumps(snapshot), json.dumps(parameters), estimated_cost, now),
+        )
+        run_id = cursor.lastrowid
+        connection.executemany(
+            "INSERT INTO run_requests (project_id, run_id, requested_model, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            [(project_id, run_id, model_id, now) for model_id in parameters['model_ids']],
+        )
+        connection.execute('UPDATE projects SET updated_at = ? WHERE id = ?', (now, project_id))
+        return run_id
+
+
+def claim_generation_run(database_path: Path, run_id: int) -> bool:
+    """A persisted run can be dispatched at most once, even across concurrent callers."""
+    with connect(database_path) as connection:
+        return connection.execute(
+            "UPDATE runs SET status = 'running' WHERE id = ? AND status = 'pending'", (run_id,),
+        ).rowcount == 1
+
+
+def mark_request_running(database_path: Path, request_id: int) -> None:
+    with connect(database_path) as connection:
+        connection.execute("UPDATE run_requests SET status = 'running' WHERE id = ? AND status = 'pending'", (request_id,))
+
+
+def save_completion(database_path: Path, request_id: int, result: "Completion", metadata: dict) -> None:
+    now = datetime.now(UTC).isoformat()
+    with connect(database_path) as connection:
+        request = connection.execute('SELECT * FROM run_requests WHERE id = ?', (request_id,)).fetchone()
+        if request is None or request['status'] != 'running':
+            raise ValueError('Request is not running; refusing to overwrite its outcome.')
+        status = 'interrupted' if result.uncertain else 'failed' if result.error else 'succeeded'
+        connection.execute(
+            'UPDATE run_requests SET status = ?, error_message = ?, provider_request_id = ?, input_tokens = ?, '
+            'output_tokens = ?, cost_usd = ?, latency_ms = ?, completed_at = ? WHERE id = ?',
+            (status, result.error, result.request_id, result.input_tokens, result.output_tokens,
+             result.cost_usd, result.latency_ms, now, request_id),
+        )
+        if result.error is None and result.text is not None:
+            # Legacy verified_provider identifies the verified API gateway, never the model author.
+            connection.execute(
+                "INSERT INTO responses (project_id, run_request_id, text, origin, verified_provider, verified_model, "
+                "finish_reason, generation_metadata_json, created_at) VALUES (?, ?, ?, 'api', 'openrouter', ?, ?, ?, ?)",
+                (request['project_id'], request_id, result.text, result.model, result.finish_reason,
+                 json.dumps(metadata, allow_nan=False), now),
+            )
+
+
+def finish_generation_run(database_path: Path, run_id: int) -> None:
+    now = datetime.now(UTC).isoformat()
+    with connect(database_path) as connection:
+        # Also covers cooperative cancellation. A hard process kill remains visibly unfinished.
+        connection.execute(
+            "UPDATE run_requests SET status = 'interrupted', error_message = ?, completed_at = ? "
+            "WHERE run_id = ? AND status IN ('pending', 'running')",
+            ('Generation was interrupted; outcome and billing may be unknown. No automatic retry.', now, run_id),
+        )
+        statuses = [row[0] for row in connection.execute('SELECT status FROM run_requests WHERE run_id = ?', (run_id,))]
+        status = ('succeeded' if all(value == 'succeeded' for value in statuses) else
+                  'partial' if 'succeeded' in statuses else 'interrupted' if 'interrupted' in statuses else 'failed')
+        connection.execute('UPDATE runs SET status = ?, completed_at = ? WHERE id = ?', (status, now, run_id))
+
+
+def list_generation_runs(database_path: Path, project_id: int) -> list[Run]:
+    with connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM runs WHERE project_id = ? AND operation = 'generation' ORDER BY id DESC", (project_id,),
+        ).fetchall()
+        return [Run.model_validate(dict(row)) for row in rows]
+
+
+def get_generation_run(database_path: Path, run_id: int) -> Run:
+    with connect(database_path) as connection:
+        row = connection.execute("SELECT * FROM runs WHERE id = ? AND operation = 'generation'", (run_id,)).fetchone()
+        if row is None:
+            raise ValueError('Generation run not found.')
+        return Run.model_validate(dict(row))
+
+
+def list_run_requests(database_path: Path, run_id: int) -> list[RunRequest]:
+    with connect(database_path) as connection:
+        rows = connection.execute('SELECT * FROM run_requests WHERE run_id = ? ORDER BY id', (run_id,)).fetchall()
+        requests = []
+        for row in rows:
+            response = connection.execute('SELECT * FROM responses WHERE run_request_id = ?', (row['id'],)).fetchone()
+            requests.append(RunRequest.model_validate({
+                **dict(row), 'response': dict(response) if response else None,
+            }))
+        return requests

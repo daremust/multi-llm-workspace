@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 import streamlit as st
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from app.config import load_settings
 from app.db import (
@@ -13,6 +13,7 @@ from app.db import (
     save_project_inputs, add_manual_response, list_manual_responses,
 )
 from app.types import OUTPUT_FORMATS, Project
+from app.generation_ui import render_generation
 
 
 def main() -> None:
@@ -73,13 +74,13 @@ def main() -> None:
     st.markdown("""<div class="workflow" aria-label="Workflow: Input, Generate, Compare, Export">
     <div><strong class="current">1. INPUT</strong><small>Add sources, a task,<br>and an output format.</small></div>
     <span class="workflow-arrow" aria-hidden="true">→</span>
-    <div><strong>2. GENERATE</strong><small>Future stage<br>Not available yet.</small></div>
+    <div><strong class="current">2. GENERATE</strong><small>Choose models.<br>Generate on demand.</small></div>
     <span class="workflow-arrow" aria-hidden="true">→</span>
     <div><strong>3. COMPARE</strong><small>Future stage<br>Not available yet.</small></div>
     <span class="workflow-arrow" aria-hidden="true">→</span>
     <div><strong>4. EXPORT</strong><small>Future stage<br>Not available yet.</small></div>
     </div>""", unsafe_allow_html=True)
-    st.caption("INPUT is available now. Generate, Compare, and Export are future stages.")
+    st.caption("Input and Generate are available. Compare and Export are future stages.")
     st.divider()
     try:
         settings = load_settings()
@@ -121,7 +122,7 @@ def main() -> None:
             '<div class="sidebar-local-status">'
             '<span class="local-dot" aria-hidden="true">●</span>'
             '<span class="local-label">Local workspace</span>'
-            '<p class="local-note">Your data stays on your Mac.</p></div>',
+            '<p class="local-note">Saved locally. Generate sends inputs to OpenRouter.</p></div>',
             unsafe_allow_html=True,
         )
 
@@ -131,7 +132,7 @@ def main() -> None:
         st.markdown("Sources → Task → Output format → Optional manual response")
         st.caption("Your saved work stays on this device.")
         st.divider()
-        st.caption("No model calls are made at this stage.")
+        st.caption("No model calls happen automatically. Generation requires an explicit Generate action.")
         return
     try:
         current = get_project(settings.database_path, st.session_state["project_id"])
@@ -144,11 +145,11 @@ def main() -> None:
     st.subheader(current.name)
     st.caption(f"Project #{current.id} · Created {current.created_at:%Y-%m-%d %H:%M UTC}")
     try:
-        render_workspace(settings.database_path, current)
+        render_workspace(settings.database_path, current, settings.openrouter_api_key)
     except sqlite3.Error:
         st.error("Could not read or save workspace data. Check database permissions and try again.")
     st.divider()
-    st.caption("No model calls are made at this stage.")
+    st.caption("No model calls happen automatically. Generation requires an explicit Generate action.")
 
 
 def step(number: str, title: str, explanation: str, *, first: bool = False) -> None:
@@ -162,7 +163,7 @@ def step(number: str, title: str, explanation: str, *, first: bool = False) -> N
     st.caption(explanation)
 
 
-def render_workspace(database_path: Path, project: Project) -> None:
+def render_workspace(database_path: Path, project: Project, api_key: SecretStr | None = None) -> None:
     prefix = f"project_{project.id}"
     step("01", "SOURCE OF TRUTH", "The original material that future generations will be grounded in.", first=True)
     sources = list_sources(database_path, project.id)
@@ -224,7 +225,9 @@ def render_workspace(database_path: Path, project: Project) -> None:
         else:
             st.caption("Saved locally · Task and output format")
 
-    step("04 · OPTIONAL", "MANUAL RESPONSE", "Paste a response you obtained elsewhere. Provider and model labels are unverified claims.")
+    render_generation(database_path, project.id, api_key)
+
+    step("OPTIONAL", "MANUAL RESPONSE", "Paste a response you obtained elsewhere. Provider and model labels are unverified claims.")
     with st.form(f"{prefix}_manual", clear_on_submit=True, border=False):
         response_text = st.text_area("Manual response text", height=180)
         provider = st.text_input("Claimed provider (optional)")
