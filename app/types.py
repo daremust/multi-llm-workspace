@@ -53,6 +53,7 @@ class Response(BaseModel):
     verified_model: str | None
     claimed_provider: str | None
     claimed_model: str | None
+    human_rating: int | None = None
     finish_reason: str | None = None
     generation_metadata_json: str = "{}"
     created_at: datetime
@@ -86,3 +87,13 @@ class RunRequest(BaseModel):
     created_at: datetime
     completed_at: datetime | None
     response: Response | None = None
+
+
+class Version(BaseModel):
+    id: int
+    project_id: int
+    derived_from_response_id: int | None
+    derived_from_version_id: int | None
+    operation: str
+    text: str
+    created_at: datetime

@@ -40,23 +40,22 @@ def render_generation(database_path: Path, project_id: int, api_key: SecretStr |
         st.caption('OPENROUTER_API_KEY is not configured. Add it to your environment or .env to generate; local inputs and saved results remain available.')
     if st.button('Load / refresh model catalog', key=f'catalog_refresh_{project_id}'):
         cached_catalog.clear()
-        st.session_state['catalog_loaded'] = True
-    if st.session_state.get('catalog_loaded'):
         try:
             with st.spinner('Loading model catalog…'):
-                catalog = cached_catalog()
+                st.session_state['loaded_catalog'] = cached_catalog()
         except OpenRouterError as exc:
             st.error(str(exc))
-            st.session_state['catalog_loaded'] = False
-        else:
-            render_selector(database_path, project_id, api_key, catalog)
+            st.session_state.pop('loaded_catalog', None)
+    # Review reruns must never refresh an expired network cache implicitly.
+    if catalog := st.session_state.get('loaded_catalog'):
+        render_selector(database_path, project_id, api_key, catalog)
     else:
         st.caption('Load the public catalog to see available models and current prices. This does not generate model output.')
     render_results(database_path, project_id)
 
 
 def render_selector(database_path: Path, project_id: int, api_key: SecretStr | None, catalog: Catalog) -> None:
-    st.caption(f'Catalog fetched {catalog.fetched_at:%Y-%m-%d %H:%M:%S UTC} · cached up to 15 minutes · text-capable models only.')
+    st.caption(f'Catalog fetched {catalog.fetched_at:%Y-%m-%d %H:%M:%S UTC} · refresh after 15 minutes to generate · text-capable models only.')
     free_only = st.checkbox('Free token pricing only', key=f'free_models_{project_id}')
     available = {model.id: model for model in catalog.models if not free_only or model.free_tokens}
     if not available:
@@ -124,7 +123,7 @@ def render_results(database_path: Path, project_id: int) -> None:
     runs = list_generation_runs(database_path, project_id)
     if not runs:
         return
-    st.markdown('### MODEL RESPONSES')
+    st.markdown('### COMPARE · HUMAN REVIEW')
     by_id = {run.id: run for run in runs}
     key = f'run_{project_id}'
     if st.session_state.get(key) not in by_id:
@@ -139,26 +138,6 @@ def render_results(database_path: Path, project_id: int) -> None:
         st.json(json.loads(run.input_snapshot_json))
         st.json(json.loads(run.parameters_json))
     requests = list_run_requests(database_path, run_id)
-    for offset in range(0, len(requests), 2):
-        group = requests[offset:offset + 2]
-        for column, request in zip(st.columns(len(group)), group):
-            with column:
-                st.markdown('---')
-                st.write(request.requested_model)
-                status = 'uncertain / interrupted' if request.status == 'interrupted' else request.status
-                st.caption(f'Gateway: OpenRouter · Request #{request.id} · {status}')
-                if request.error_message:
-                    st.error(request.error_message)
-                st.caption(f'Input tokens: {request.input_tokens if request.input_tokens is not None else "unknown"} · '
-                           f'Output tokens: {request.output_tokens if request.output_tokens is not None else "unknown"} · '
-                           f'Reported cost: {money(request.cost_usd)} · '
-                           f'Latency: {str(request.latency_ms) + " ms" if request.latency_ms is not None else "unknown"}')
-                if request.response:
-                    response = request.response
-                    metadata = json.loads(response.generation_metadata_json)
-                    st.caption(f'Origin: API · Reported model: {response.verified_model or "unknown"} · '
-                               f'Upstream provider: {metadata.get("upstream_provider") or "not reported"}')
-                    st.caption(f'OpenRouter request ID: {request.provider_request_id or "not reported"} · '
-                               f'Finish reason: {response.finish_reason or "not reported"} · '
-                               f'Saved {response.created_at:%Y-%m-%d %H:%M:%S UTC}')
-                    st.text(response.text)
+    from app.review_ui import render_comparison
+
+    render_comparison(database_path, project_id, requests)

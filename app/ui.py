@@ -76,11 +76,11 @@ def main() -> None:
     <span class="workflow-arrow" aria-hidden="true">→</span>
     <div><strong class="current">2. GENERATE</strong><small>Choose models.<br>Generate on demand.</small></div>
     <span class="workflow-arrow" aria-hidden="true">→</span>
-    <div><strong>3. COMPARE</strong><small>Future stage<br>Not available yet.</small></div>
+    <div><strong class="current">3. COMPARE</strong><small>Review, select,<br>and edit by hand.</small></div>
     <span class="workflow-arrow" aria-hidden="true">→</span>
     <div><strong>4. EXPORT</strong><small>Future stage<br>Not available yet.</small></div>
     </div>""", unsafe_allow_html=True)
-    st.caption("Input and Generate are available. Compare and Export are future stages.")
+    st.caption("Input, Generate, and Compare are available. Export is a future stage.")
     st.divider()
     try:
         settings = load_settings()
