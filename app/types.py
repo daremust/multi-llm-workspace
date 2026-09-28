@@ -56,6 +56,7 @@ class Response(BaseModel):
     human_rating: int | None = None
     finish_reason: str | None = None
     generation_metadata_json: str = "{}"
+    structured_result_json: str | None = None
     created_at: datetime
 
 
@@ -63,6 +64,7 @@ class Run(BaseModel):
     id: int
     project_id: int
     operation: str
+    parent_run_id: int | None = None
     status: str
     prompt_version: str
     input_snapshot_json: str

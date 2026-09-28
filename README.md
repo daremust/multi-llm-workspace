@@ -1,6 +1,6 @@
 # Multi-LLM Workspace
 
-A local-first, single-user Streamlit workspace. Milestones 1–4 support project inputs, OpenRouter generation, and local human comparison, ratings, selection, and editing.
+A local-first, single-user Streamlit workspace. Milestones 1–5 support project inputs, OpenRouter generation, local human review/editing, and explicit optional compute.
 
 ## Run
 
@@ -63,3 +63,28 @@ Open any saved generation run to compare responses without an API key or new req
 `app/review.py` performs transactional local mutations using existing schema version 1. Ratings use `responses.human_rating`; primary selection is a single lookup of the latest `selection_changed` entry in the existing minimal human-action history (no event replay). Versions use the existing derivation links and `projects.current_version_id`. Repeated unchanged actions are no-ops. `app/review_ui.py` presents comparison and editing without provider dependencies.
 
 All review actions are local and make zero API calls, including catalog calls on reruns. Advanced responsive polish, diffs, branching graphs, critique, rewrite, merge, and fact checking remain outside Milestone 4.
+
+## Optional compute (Milestone 5)
+
+Open **Choose an optional operation** after generation/review. Choose the operation, its inputs, and the model yourself. Review **Additional API calls: 1**, the estimate, and the inspectable request before clicking its **Run** button. Loading a catalog is a separate explicit action. No optional operation is triggered by generation, viewing results, changing selections, saving a version, or rerunning Streamlit.
+
+- **Rewrite:** use the current Working copy (including unsaved edits) or the current saved version, with optional instructions. The returned text is a candidate, not a replacement.
+- **Merge:** explicitly select at least two distinct successful API draft responses or saved versions. Only those inputs are merged. Optional instructions are supported; agreement among models is not treated as evidence.
+- **Critique:** use the chosen current draft and saved task/output context, with optional instructions. Structured qualitative feedback contains strengths, issues, factual/support concerns, clarity/structure notes, and suggested changes. There are no AI rating, ranking, winner, or adoption controls for this feedback.
+- **Fact check:** one request verifies the chosen draft against the original project source text snapshotted in that run. Each claim is SUPPORTED, UNSUPPORTED, or UNCLEAR, with source IDs and exact excerpts where available. **UNSUPPORTED means not substantiated by the supplied sources, not false.** No external research, tools, or additional model responses are used as evidence.
+
+Fact check requests strict API-level JSON Schema only when the selected catalog model advertises `structured_outputs`; `response_format` alone is not sufficient. Existing `require_parameters: true` and `allow_fallbacks: false` provider constraints remain in force. No extra capability lookup is made. Catalog metadata is advisory: a provider may still reject the schema or truncate output. Otherwise, the UI discloses prompt-only / best-effort compatibility before execution. Both paths make exactly one request, with no repair, retry, or model/provider fallback. Local Pydantic validation and grounding in a contiguous original source passage always remain required. Exact excerpt matching is preferred; a fallback permits differences only between existing ASCII whitespace runs (spaces, tabs, and line breaks), preserving all other characters and whitespace boundaries. On success, validated evidence stores the exact original passage; raw model output and immutable source snapshots stay unchanged. No case folding, Unicode normalization, fuzzy matching, or skipped intervening text is allowed. Separate source passages require separate references.
+
+Optional runs appear in **Optional compute history**, separate from initial generation comparisons. Full input snapshots, selected response/version IDs and texts, prompts, model parameters, provider/request metadata, token usage, reported cost, and latency remain inspectable. Unknown values remain unknown. The existing 15-minute catalog freshness check, pricing heuristic, request claiming, timeouts, and no-retry behavior are reused.
+
+Rewrite/merge candidates may be edited locally, then explicitly **Save / adopt candidate as current** creates a version, selects that candidate as primary, and sets the version current. It makes no API call. Original responses remain unchanged. Repeated adoption of the same candidate text reuses its saved version. Critique and fact-check results never change the current draft or version.
+
+### Persistence and validation
+
+No schema migration is required. M5 uses the existing run operation types, `runs.parent_run_id`, response kinds, `responses.structured_result_json`, and version derivation links. A single shared parent run is linked directly; merges spanning multiple runs retain all parent IDs in their selected-input snapshot instead of choosing an arbitrary parent. Adopted versions link to the candidate response; a single input version is also linked through `derived_from_version_id`. Multiple merge inputs remain recorded on the producing run.
+
+`app/optional_prompts.py` contains the dedicated prompts and strict local Pydantic schemas. `app/optional_compute.py` validates input choices and builds requests using the shared generation planner. `app/optional_ui.py` provides the controls and result rendering; the existing executor and OpenRouter client perform the single request.
+
+Malformed structured output is a failed validation outcome: its raw response, reported usage, and cost remain saved, and the UI shows an error. No repair or retry call occurs. Source verification also checks locally that cited source IDs exist in the run's snapshot, quoted excerpts exactly match those sources, and SUPPORTED claims contain a reference. These checks verify reference integrity, **not semantic entailment or real-world truth**. Model feedback still requires human judgment. Long/truncated output or models that do not follow the JSON instructions can fail validation.
+
+Saved input context is authoritative except when the human explicitly chooses the current Working copy: that exact unsaved text is captured as the operation input, together with its saved response/version base. Unsaved candidate edits are browser-session state until adopted. No chaining, automatic adoption, automatic selection, external fact checking, or M6 redesign is implemented.

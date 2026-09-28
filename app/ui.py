@@ -14,6 +14,7 @@ from app.db import (
 )
 from app.types import OUTPUT_FORMATS, Project
 from app.generation_ui import render_generation
+from app.optional_ui import render_optional_compute
 
 
 def main() -> None:
@@ -122,7 +123,7 @@ def main() -> None:
             '<div class="sidebar-local-status">'
             '<span class="local-dot" aria-hidden="true">●</span>'
             '<span class="local-label">Local workspace</span>'
-            '<p class="local-note">Saved locally. Generate sends inputs to OpenRouter.</p></div>',
+            '<p class="local-note">Saved locally. Explicit model actions send selected inputs to OpenRouter.</p></div>',
             unsafe_allow_html=True,
         )
 
@@ -132,7 +133,7 @@ def main() -> None:
         st.markdown("Sources → Task → Output format → Optional manual response")
         st.caption("Your saved work stays on this device.")
         st.divider()
-        st.caption("No model calls happen automatically. Generation requires an explicit Generate action.")
+        st.caption("No model calls happen automatically. Generate and optional operations require explicit actions.")
         return
     try:
         current = get_project(settings.database_path, st.session_state["project_id"])
@@ -149,7 +150,7 @@ def main() -> None:
     except sqlite3.Error:
         st.error("Could not read or save workspace data. Check database permissions and try again.")
     st.divider()
-    st.caption("No model calls happen automatically. Generation requires an explicit Generate action.")
+    st.caption("No model calls happen automatically. Generate and optional operations require explicit actions.")
 
 
 def step(number: str, title: str, explanation: str, *, first: bool = False) -> None:
@@ -226,6 +227,7 @@ def render_workspace(database_path: Path, project: Project, api_key: SecretStr |
             st.caption("Saved locally · Task and output format")
 
     render_generation(database_path, project.id, api_key)
+    render_optional_compute(database_path, project.id, api_key)
 
     step("OPTIONAL", "MANUAL RESPONSE", "Paste a response you obtained elsewhere. Provider and model labels are unverified claims.")
     with st.form(f"{prefix}_manual", clear_on_submit=True, border=False):

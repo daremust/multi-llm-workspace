@@ -12,8 +12,8 @@ from typing import Any
 import httpx
 
 from app.db import (
-    claim_generation_run, create_generation_run, finish_generation_run, generation_inputs,
-    get_generation_run, list_run_requests, mark_request_running, save_completion,
+    claim_generation_run, create_run, finish_generation_run, generation_inputs,
+    get_run, list_run_requests, mark_request_running, save_completion,
 )
 from app.openrouter import CATALOG_TTL_SECONDS, Catalog, CatalogModel, OpenRouter, price
 from app.types import RunRequest
@@ -82,10 +82,20 @@ class GenerationPlan:
     snapshot: dict[str, Any]
     parameters: dict[str, Any]
     estimate: Estimate
+    operation: str = 'generation'
+    parent_run_id: int | None = None
+    prompt_version: str = PROMPT_VERSION
 
 
 def prepare_generation(database_path: Path, project_id: int, catalog: Catalog,
                        model_ids: list[str], max_tokens: int = 1024, temperature: float = 0.7) -> GenerationPlan:
+    snapshot = generation_inputs(database_path, project_id)
+    return prepare_requests(snapshot, catalog, model_ids, build_messages(snapshot), max_tokens, temperature)
+
+
+def prepare_requests(snapshot: dict, catalog: Catalog, model_ids: list[str],
+                     messages: list[dict[str, str]], max_tokens: int = 1024,
+                     temperature: float = 0.7) -> GenerationPlan:
     if not model_ids or len(model_ids) != len(set(model_ids)):
         raise ValueError('Select one or more distinct models.')
     if not 1 <= max_tokens <= 32768 or not math.isfinite(temperature) or not 0 <= temperature <= 2:
@@ -96,8 +106,6 @@ def prepare_generation(database_path: Path, project_id: int, catalog: Catalog,
     if any(model_id not in available for model_id in model_ids):
         raise ValueError('A selected model is no longer in the catalog. Choose models again; no substitution was made.')
     models = [available[model_id] for model_id in model_ids]
-    snapshot = generation_inputs(database_path, project_id)
-    messages = build_messages(snapshot)
     snapshot['messages'] = messages
     estimate = estimate_cost(models, messages, max_tokens)
     payloads = {}
@@ -128,7 +136,7 @@ async def execute_run(database_path: Path, run_id: int, gateway: OpenRouter) -> 
         return False
     tasks = []
     try:
-        run = get_generation_run(database_path, run_id)
+        run = get_run(database_path, run_id)
         parameters = json.loads(run.parameters_json)
         semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
         async with httpx.AsyncClient(
@@ -147,7 +155,25 @@ async def execute_run(database_path: Path, run_id: int, gateway: OpenRouter) -> 
                         'model_namespace': request.requested_model.split('/', 1)[0],
                         'catalog_name': model['name'], 'upstream_provider': result.upstream_provider,
                     }
-                    save_completion(database_path, request.id, result, metadata)
+                    structured = None
+                    validation_error = None
+                    kind = run.operation if run.operation in {'critique', 'fact_check'} else 'draft'
+                    if kind != 'draft' and result.error is None and result.text is not None:
+                        from app.optional_prompts import validate_structured_result
+
+                        try:
+                            structured = validate_structured_result(kind, result.text, json.loads(run.input_snapshot_json))
+                        except ValueError as exc:
+                            validation_error = str(exc)
+                            if kind == 'fact_check' and result.finish_reason == 'length':
+                                limit = parameters['requests'][request.requested_model]['max_tokens']
+                                validation_error += (
+                                    f' Output reached the configured token limit ({limit:,} output tokens) '
+                                    'and may have been truncated. No automatic retry was made.'
+                                )
+                            metadata['structured_output_error'] = validation_error
+                    save_completion(database_path, request.id, result, metadata, kind=kind,
+                                    structured_result=structured, validation_error=validation_error)
 
             tasks = [asyncio.create_task(worker(request)) for request in list_run_requests(database_path, run_id)]
             # Wait for every worker even if one persistence operation raises.
@@ -168,7 +194,8 @@ async def execute_run(database_path: Path, run_id: int, gateway: OpenRouter) -> 
 def generate(database_path: Path, plan: GenerationPlan, gateway: OpenRouter) -> int:
     gateway.require_key()
     cost = plan.estimate.cost_usd
-    run_id = create_generation_run(database_path, plan.snapshot, plan.parameters, PROMPT_VERSION,
-                                   float(cost) if cost is not None else None)
+    run_id = create_run(database_path, plan.snapshot, plan.parameters, plan.prompt_version,
+                        float(cost) if cost is not None else None, operation=plan.operation,
+                        parent_run_id=plan.parent_run_id)
     asyncio.run(execute_run(database_path, run_id, gateway))
     return run_id

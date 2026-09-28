@@ -39,7 +39,8 @@ def render_comparison(database_path: Path, project_id: int, requests: list[RunRe
     render_editor(database_path, project_id)
 
 
-def render_response(database_path: Path, project_id: int, request: RunRequest, primary_id: int | None) -> None:
+def render_response(database_path: Path, project_id: int, request: RunRequest, primary_id: int | None, *,
+                    show_body: bool = True, allow_review: bool = True) -> None:
     response = request.response
     metadata = json.loads(response.generation_metadata_json) if response else {}
     name = metadata.get('catalog_name') or request.requested_model.split('/', 1)[-1]
@@ -75,9 +76,9 @@ def render_response(database_path: Path, project_id: int, request: RunRequest, p
             'generation_metadata': metadata,
         })
         st.caption('Null metadata means unknown / not reported. Catalog namespace is a label, not verified upstream provenance.')
-    if response:
+    if response and show_body:
         st.text(response.text)
-    if response and request.status == 'succeeded':
+    if allow_review and response and request.status == 'succeeded':
         options = [None, 1, 2, 3, 4, 5]
         rating = st.selectbox('Human rating', options, index=options.index(response.human_rating),
                               format_func=lambda value: 'Unrated' if value is None else '★' * value,
@@ -88,6 +89,10 @@ def render_response(database_path: Path, project_id: int, request: RunRequest, p
         if st.button('Set as primary', key=f'primary_{response.id}', disabled=response.id == primary_id):
             select_primary_response(database_path, project_id, response.id)
             st.rerun()
+
+
+def draft_state_key(project_id: int, response_id: int, version_id: int | None) -> str:
+    return f'review_draft_{project_id}_{response_id}_{version_id if version_id else "original"}'
 
 
 def _keep_draft(widget_key: str, draft_key: str) -> None:
@@ -105,7 +110,7 @@ def render_editor(database_path: Path, project_id: int) -> None:
     else:
         base = current if current and current.derived_from_response_id == primary.id else None
         st.caption(f'Primary response #{primary.id} · Starting from ' + (f'version #{base.id}.' if base else 'the original response.'))
-        draft_key = f'review_draft_{project_id}_{primary.id}_{base.id if base else "original"}'
+        draft_key = draft_state_key(project_id, primary.id, base.id if base else None)
         widget_key = f'editor_{draft_key}'
         # Separate non-widget state survives Streamlit removing widgets on project/run switches.
         if draft_key not in st.session_state:
@@ -144,7 +149,7 @@ def render_editor(database_path: Path, project_id: int) -> None:
         set_current_version(database_path, project_id, version.id)
         # Explicit version changes replace that version's cached draft and widget value.
         # Ordinary reruns still preserve unsaved edits through _keep_draft.
-        target_draft = f'review_draft_{project_id}_{version.derived_from_response_id}_{version.id}'
+        target_draft = draft_state_key(project_id, version.derived_from_response_id, version.id)
         st.session_state[target_draft] = version.text
         st.session_state.pop(f'editor_{target_draft}', None)
         st.session_state.pop(f'review_notice_{project_id}', None)

@@ -173,13 +173,19 @@ def generation_inputs(database_path: Path, project_id: int) -> dict[str, Any]:
 
 def create_generation_run(database_path: Path, snapshot: dict, parameters: dict,
                           prompt_version: str, estimated_cost: float | None) -> int:
+    return create_run(database_path, snapshot, parameters, prompt_version, estimated_cost)
+
+
+def create_run(database_path: Path, snapshot: dict, parameters: dict,
+               prompt_version: str, estimated_cost: float | None, *,
+               operation: str = 'generation', parent_run_id: int | None = None) -> int:
     now = datetime.now(UTC).isoformat()
     project_id = snapshot['project_id']
     with connect(database_path) as connection:
         cursor = connection.execute(
-            "INSERT INTO runs (project_id, operation, status, prompt_version, input_snapshot_json, parameters_json, estimated_cost_usd, created_at) "
-            "VALUES (?, 'generation', 'pending', ?, ?, ?, ?, ?)",
-            (project_id, prompt_version, json.dumps(snapshot), json.dumps(parameters), estimated_cost, now),
+            "INSERT INTO runs (project_id, operation, parent_run_id, status, prompt_version, input_snapshot_json, parameters_json, estimated_cost_usd, created_at) "
+            "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+            (project_id, operation, parent_run_id, prompt_version, json.dumps(snapshot), json.dumps(parameters), estimated_cost, now),
         )
         run_id = cursor.lastrowid
         connection.executemany(
@@ -203,26 +209,30 @@ def mark_request_running(database_path: Path, request_id: int) -> None:
         connection.execute("UPDATE run_requests SET status = 'running' WHERE id = ? AND status = 'pending'", (request_id,))
 
 
-def save_completion(database_path: Path, request_id: int, result: "Completion", metadata: dict) -> None:
+def save_completion(database_path: Path, request_id: int, result: "Completion", metadata: dict, *,
+                    kind: str = 'draft', structured_result: dict | None = None,
+                    validation_error: str | None = None) -> None:
     now = datetime.now(UTC).isoformat()
     with connect(database_path) as connection:
         request = connection.execute('SELECT * FROM run_requests WHERE id = ?', (request_id,)).fetchone()
         if request is None or request['status'] != 'running':
             raise ValueError('Request is not running; refusing to overwrite its outcome.')
-        status = 'interrupted' if result.uncertain else 'failed' if result.error else 'succeeded'
+        status = 'interrupted' if result.uncertain else 'failed' if result.error or validation_error else 'succeeded'
         connection.execute(
             'UPDATE run_requests SET status = ?, error_message = ?, provider_request_id = ?, input_tokens = ?, '
             'output_tokens = ?, cost_usd = ?, latency_ms = ?, completed_at = ? WHERE id = ?',
-            (status, result.error, result.request_id, result.input_tokens, result.output_tokens,
+            (status, result.error or validation_error, result.request_id, result.input_tokens, result.output_tokens,
              result.cost_usd, result.latency_ms, now, request_id),
         )
         if result.error is None and result.text is not None:
             # Legacy verified_provider identifies the verified API gateway, never the model author.
             connection.execute(
                 "INSERT INTO responses (project_id, run_request_id, text, origin, verified_provider, verified_model, "
-                "finish_reason, generation_metadata_json, created_at) VALUES (?, ?, ?, 'api', 'openrouter', ?, ?, ?, ?)",
+                "finish_reason, generation_metadata_json, kind, structured_result_json, created_at) "
+                "VALUES (?, ?, ?, 'api', 'openrouter', ?, ?, ?, ?, ?, ?)",
                 (request['project_id'], request_id, result.text, result.model, result.finish_reason,
-                 json.dumps(metadata, allow_nan=False), now),
+                 json.dumps(metadata, allow_nan=False), kind,
+                 json.dumps(structured_result, allow_nan=False) if structured_result is not None else None, now),
             )
 
 
@@ -250,8 +260,15 @@ def list_generation_runs(database_path: Path, project_id: int) -> list[Run]:
 
 
 def get_generation_run(database_path: Path, run_id: int) -> Run:
+    run = get_run(database_path, run_id)
+    if run.operation != 'generation':
+        raise ValueError('Generation run not found.')
+    return run
+
+
+def get_run(database_path: Path, run_id: int) -> Run:
     with connect(database_path) as connection:
-        row = connection.execute("SELECT * FROM runs WHERE id = ? AND operation = 'generation'", (run_id,)).fetchone()
+        row = connection.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         if row is None:
             raise ValueError('Generation run not found.')
         return Run.model_validate(dict(row))
@@ -267,3 +284,12 @@ def list_run_requests(database_path: Path, run_id: int) -> list[RunRequest]:
                 **dict(row), 'response': dict(response) if response else None,
             }))
         return requests
+
+
+def list_optional_runs(database_path: Path, project_id: int) -> list[Run]:
+    with connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM runs WHERE project_id = ? AND operation IN ('rewrite', 'merge', 'critique', 'fact_check') ORDER BY id DESC",
+            (project_id,),
+        ).fetchall()
+        return [Run.model_validate(dict(row)) for row in rows]

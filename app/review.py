@@ -12,7 +12,7 @@ def _response(connection, project_id: int, response_id: int):
     row = connection.execute(
         "SELECT r.* FROM responses r JOIN run_requests q ON q.id = r.run_request_id "
         "JOIN runs g ON g.id = q.run_id WHERE r.project_id = ? AND r.id = ? "
-        "AND r.origin = 'api' AND q.status = 'succeeded' AND g.operation = 'generation'",
+        "AND r.origin = 'api' AND r.kind = 'draft' AND q.status = 'succeeded' AND g.operation IN ('generation', 'rewrite', 'merge')",
         (project_id, response_id),
     ).fetchone()
     if row is None:
@@ -116,5 +116,38 @@ def save_review_version(database_path: Path, project_id: int, response_id: int, 
             "VALUES (?, ?, ?, 'manual_edit', ?, ?)",
             (project_id, response_id, base_version_id, text, datetime.now(UTC).isoformat()),
         ).lastrowid
+        _set_current(connection, project_id, version_id)
+        return version_id
+
+
+def adopt_candidate(database_path: Path, project_id: int, response_id: int, text: str) -> int:
+    """Explicitly save/adopt a rewrite or merge; compute itself never invokes this."""
+    if not text.strip():
+        raise ValueError('The candidate version cannot be empty.')
+    with connect(database_path) as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        _response(connection, project_id, response_id)
+        run = connection.execute(
+            'SELECT g.* FROM runs g JOIN run_requests q ON q.run_id = g.id '
+            'JOIN responses r ON r.run_request_id = q.id WHERE r.id = ?', (response_id,),
+        ).fetchone()
+        if run['operation'] not in {'rewrite', 'merge'}:
+            raise ValueError('Only rewrite or merge candidates can be adopted here.')
+        inputs = json.loads(run['input_snapshot_json'])['selected_inputs']
+        base_id = inputs[0]['version_id'] if len(inputs) == 1 else None
+        existing = connection.execute(
+            'SELECT id FROM versions WHERE project_id = ? AND derived_from_response_id = ? AND text = ? ORDER BY id DESC LIMIT 1',
+            (project_id, response_id, text),
+        ).fetchone()
+        now = datetime.now(UTC).isoformat()
+        version_id = existing['id'] if existing else connection.execute(
+            'INSERT INTO versions (project_id, derived_from_response_id, derived_from_version_id, operation, text, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+            (project_id, response_id, base_id, run['operation'], text, now),
+        ).lastrowid
+        if _primary_id(connection, project_id) != response_id:
+            connection.execute(
+                "INSERT INTO project_events (project_id, event_type, response_id, payload_json, created_at) VALUES (?, 'selection_changed', ?, '{}', ?)",
+                (project_id, response_id, now),
+            )
         _set_current(connection, project_id, version_id)
         return version_id
