@@ -14,22 +14,26 @@ from app.optional_compute import default_output_tokens, draft_inputs, prepare_op
 from app.optional_prompts import OPERATIONS
 from app.review import adopt_candidate, get_primary_response, list_versions
 from app.review_ui import draft_state_key, render_response
+from app.ui_style import section_label, status_label
 
 LABELS = {'rewrite': 'Rewrite', 'merge': 'Merge', 'critique': 'Critique', 'fact_check': 'Fact check · sources only'}
 
 
 def render_optional_compute(database_path: Path, project_id: int, api_key: SecretStr | None) -> None:
-    st.markdown('### OPTIONAL COMPUTE')
-    st.caption('Additional compute only when you ask. One request per operation; no chaining, automatic retries, or automatic adoption.')
-    with st.expander('Choose an optional operation'):
+    runs = list_optional_runs(database_path, project_id)
+    state = f"Latest run #{runs[0].id} · {status_label(runs[0].status)}" if runs else "Only when needed"
+    if runs and any(request.cost_usd is None for request in list_run_requests(database_path, runs[0].id)):
+        state += " · Cost unknown"
+    with st.expander(section_label("OPTIONAL COMPUTE", state)):
+        st.caption('Additional compute only when you ask. One request per operation; no chaining, automatic retries, or automatic adoption.')
         render_controls(database_path, project_id, api_key)
-    render_optional_history(database_path, project_id)
+        render_optional_history(database_path, project_id)
 
 
 def render_controls(database_path: Path, project_id: int, api_key: SecretStr | None) -> None:
     inputs = draft_inputs(database_path, project_id)
     if not inputs:
-        st.caption('Generate and review a response first. No optional requests have been made.')
+        st.caption('Add a manual response or generate a response first. Optional Compute runs only when requested.')
         return
     operation = st.selectbox('Optional operation', OPERATIONS, format_func=LABELS.get, key=f'optional_operation_{project_id}')
     input_refs = []
@@ -44,7 +48,7 @@ def render_controls(database_path: Path, project_id: int, api_key: SecretStr | N
         primary = get_primary_response(database_path, project_id)
         current = next((version for version in list_versions(database_path, project_id)
                         if version.id == project.current_version_id), None)
-        modes = (['Working copy'] if primary else []) + (['Current saved version'] if current else [])
+        modes = (['Working copy'] if primary else []) + (['Current version'] if current else [])
         if modes:
             mode = st.radio('Draft input', modes, horizontal=True, key=f'optional_input_{project_id}_{operation}')
             if mode == 'Working copy':
@@ -64,10 +68,11 @@ def render_controls(database_path: Path, project_id: int, api_key: SecretStr | N
     if st.button('Load / refresh optional model catalog', key=f'optional_catalog_{project_id}'):
         cached_catalog.clear()
         try:
-            st.session_state['loaded_catalog'] = cached_catalog()
+            with st.spinner('Loading models…'):
+                st.session_state['loaded_catalog'] = cached_catalog()
         except OpenRouterError as exc:
             st.session_state.pop('loaded_catalog', None)
-            st.error(str(exc))
+            st.error(f'Model catalog unavailable: {exc}')
     catalog = st.session_state.get('loaded_catalog')
     plan = None
     if catalog:
@@ -122,7 +127,7 @@ def render_controls(database_path: Path, project_id: int, api_key: SecretStr | N
             st.error(str(exc))
         else:
             st.session_state[f'optional_history_{project_id}'] = run_id
-            st.caption(f'Optional run #{run_id} saved. Your current draft and primary choice are unchanged.')
+            st.caption(f'Optional run #{run_id} saved. Your Working copy, Primary response, and Current version are unchanged.')
 
 
 def render_optional_history(database_path: Path, project_id: int) -> None:
@@ -134,7 +139,7 @@ def render_optional_history(database_path: Path, project_id: int) -> None:
     if st.session_state.get(key) not in by_id:
         st.session_state[key] = runs[0].id
     run_id = st.selectbox('Optional compute history', list(by_id), key=key,
-                          format_func=lambda value: f'#{value} · {LABELS[by_id[value].operation]} · {by_id[value].status}')
+                          format_func=lambda value: f'#{value} · {LABELS[by_id[value].operation]} · {status_label(by_id[value].status)}')
     run = by_id[run_id]
     if run.status in {'pending', 'running'}:
         st.warning('This run is unfinished or still running. Completion and billing may be uncertain; it will not resume automatically.')
@@ -167,24 +172,26 @@ def render_optional_history(database_path: Path, project_id: int) -> None:
             if run.operation == 'critique':
                 st.caption('Model-generated qualitative feedback. No rating or selection was changed.')
                 for field, notes in result.items():
-                    st.markdown(f'**{field.replace("_", " ").capitalize()}**')
-                    for note in notes:
-                        st.text(note)
-                    if not notes:
-                        st.caption('None reported.')
+                    with st.expander(f'{field.replace("_", " ").capitalize()} · {len(notes)} notes'):
+                        for note in notes:
+                            st.text(note)
+                        if not notes:
+                            st.caption('None reported.')
             else:
                 st.caption('Model-generated source verification, not an independent truth verdict. UNSUPPORTED means not substantiated by supplied sources, not false.')
-                for claim in result['claims']:
+                for index, claim in enumerate(result['claims'], 1):
                     st.write(claim['classification'])
                     st.text(claim['claim'])
-                    st.text(claim['explanation'])
-                    for ref in claim['references']:
-                        st.caption(f'Source #{ref["source_id"]}')
-                        st.text(ref['excerpt'])
+                    with st.expander(f'Explanation and sources · claim {index}'):
+                        st.text(claim['explanation'])
+                        for ref in claim['references']:
+                            st.caption(f'Source #{ref["source_id"]}')
+                            st.text(ref['excerpt'])
                 if not result['claims']:
                     st.caption('No factual claims were reported by the model.')
             with st.expander('Raw model output'):
                 st.text(response.text)
         else:
             st.caption('Structured output could not be validated. Raw result retained; no repair request was made.')
-            st.text(response.text)
+            with st.expander('Raw unvalidated model output'):
+                st.text(response.text)

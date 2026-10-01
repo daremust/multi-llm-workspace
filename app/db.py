@@ -293,3 +293,24 @@ def list_optional_runs(database_path: Path, project_id: int) -> list[Run]:
             (project_id,),
         ).fetchall()
         return [Run.model_validate(dict(row)) for row in rows]
+
+
+def rename_project(database_path: Path, project_id: int, name: str) -> None:
+    validated = ProjectCreate(name=name)
+    with connect(database_path) as connection:
+        cursor = connection.execute('UPDATE projects SET name = ?, updated_at = ? WHERE id = ?',
+                                    (validated.name, datetime.now(UTC).isoformat(), project_id))
+        if cursor.rowcount != 1:
+            raise ValueError('Project is no longer available.')
+
+
+def delete_project(database_path: Path, project_id: int) -> None:
+    """Delete one ownership graph atomically, including circular version links."""
+    with connect(database_path) as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        # Schema v1 has NO ACTION FKs, not cascades. Defer checks until all rows
+        # in this project have been removed; foreign keys remain enabled.
+        connection.execute('PRAGMA defer_foreign_keys = ON')
+        for table in ('project_events', 'versions', 'responses', 'run_requests', 'runs', 'sources'):
+            connection.execute(f'DELETE FROM {table} WHERE project_id = ?', (project_id,))
+        connection.execute('DELETE FROM projects WHERE id = ?', (project_id,))

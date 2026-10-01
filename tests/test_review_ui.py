@@ -65,6 +65,7 @@ def test_full_review_reruns_switching_and_reopen(review_environment):
     assert not app.exception
     assert widget(app.text_area, 'Working copy').value == response.text
     widget(app.text_area, 'Working copy').set_value('Unsaved human draft').run()
+    assert any('Unsaved Working copy edits.' in c.value for c in app.caption)
     app.sidebar.selectbox[0].select(second.id).run()
     app.sidebar.selectbox[0].select(first.id).run()
     assert widget(app.text_area, 'Working copy').value == 'Unsaved human draft'
@@ -140,3 +141,125 @@ def test_switch_current_version_resets_working_copy(review_environment):
     widget(app.selectbox, 'Saved version').select(version1).run()
     widget(app.button, 'Set version as current').click().run()
     assert widget(app.text_area, 'Working copy').value == 'VERSION 1: London'
+
+
+def test_workspace_hierarchy_keeps_review_state_on_reruns(review_environment):
+    from app.db import add_text_source, save_project_inputs
+    from app.review import select_primary_response, save_review_version
+
+    project = create_project(review_environment, 'Quiet workspace')
+    add_text_source(review_environment, project.id, 'Original source')
+    save_project_inputs(review_environment, project.id, 'Saved task', 'Plain answer')
+    run_id = seed_run(review_environment, project.id, 4, failed=True)
+    response = list_run_requests(review_environment, run_id)[0].response
+    select_primary_response(review_environment, project.id, response.id)
+    version = save_review_version(review_environment, project.id, response.id, 'Saved version')
+    before = counts(review_environment)
+    app = AppTest.from_file(str(UI_PATH)).run()
+    sections = [e for e in app.main.expander if e.label.startswith(
+        ('01  ', '02  ', '03  ', '04  ', 'OPTIONAL COMPUTE', '05  '))]
+    assert [e.label.split(' · ')[0] for e in sections] == [
+        '01  SOURCE OF TRUTH', '02  TASK & OUTPUT', '03  GENERATE', '04  COMPARE', 'OPTIONAL COMPUTE', '05  FINAL']
+    assert all(not e.proto.expanded for e in sections)
+    assert 'Partial' in sections[3].label and 'Cost unknown' in sections[3].label
+    assert len([b for b in sections[3].button if b.label == 'Set as primary']) == 3
+    assert not any(t.label == 'Working copy' for t in sections[3].text_area)
+    assert widget(sections[5].text_area, 'Working copy').value == 'Saved version'
+    assert 'No automatic' not in sections[0].label
+    widget(app.text_area, 'Working copy').set_value('Unsaved working copy').run()
+    widget(app.text_area, 'Task / instructions').set_value('Unsaved task').run()
+    app.run()
+    assert not app.exception
+    assert widget(app.text_area, 'Working copy').value == 'Unsaved working copy'
+    assert counts(review_environment) == before
+    assert get_primary_response(review_environment, project.id).id == response.id
+    assert get_project(review_environment, project.id).current_version_id == version
+    assert get_project(review_environment, project.id).task == 'Saved task'
+
+
+def test_tip_dismissal_preserves_draft_and_review_state(review_environment):
+    from app.review import select_primary_response, save_review_version
+
+    project = create_project(review_environment, 'Actual project name')
+    run = seed_run(review_environment, project.id, 1)
+    response = list_run_requests(review_environment, run)[0].response
+    select_primary_response(review_environment, project.id, response.id)
+    version = save_review_version(review_environment, project.id, response.id, 'Saved version')
+    app = AppTest.from_file(str(UI_PATH)).run()
+    assert app.subheader[0].value == 'Actual project name'
+    widget(app.text_area, 'Working copy').set_value('Unsaved working text').run()
+    before = counts(review_environment)
+    widget(app.button, 'Dismiss').click().run()
+    app.run()
+    assert not app.exception
+    assert not any(b.label == 'Dismiss' for b in app.button)
+    assert not any('**Tip:**' in m.value for m in app.markdown)
+    assert widget(app.text_area, 'Working copy').value == 'Unsaved working text'
+    assert counts(review_environment) == before
+    assert get_project(review_environment, project.id).current_version_id == version
+    assert get_primary_response(review_environment, project.id).id == response.id
+
+
+def test_home_and_rename_preserve_edits_parameters_and_data(review_environment):
+    from app.db import save_project_inputs
+    from app.openrouter import parse_catalog
+    from test_openrouter import model_entry
+    from test_db import seed_project_graph, project_graph
+    project = seed_project_graph(review_environment, 'Before rename')
+    save_project_inputs(review_environment, project.id, 'Saved task', 'Custom', 'Saved format')
+    before = get_project(review_environment, project.id)
+    graph = project_graph(review_environment, project.id)
+    app = AppTest.from_file(str(UI_PATH))
+    app.session_state['loaded_catalog'] = parse_catalog({'data': [model_entry('author/free', '0', '0')]})
+    app.run()
+    widget(app.text_area, 'Working copy').set_value('Unsaved working text').run()
+    widget(app.text_area, 'Task / instructions').set_value('Unsaved task').run()
+    widget(app.text_area, 'Custom format / instructions').set_value('Unsaved format').run()
+    widget(app.multiselect, 'Models').set_value(['author/free']).run()
+    widget(app.number_input, 'Maximum output tokens per model').set_value(2048).run()
+    widget(app.sidebar.button, 'Multi-LLM\nWorkspace').click().run()
+    assert not app.exception
+    assert app.session_state['project_id'] is None
+    assert app.title[0].value == 'Multi-LLM Workspace'
+    assert get_project(review_environment, project.id) == before
+    assert project_graph(review_environment, project.id) == graph
+    assert not app.sidebar.expander  # Help now follows the main content.
+    assert any(e.label == 'How this workspace works' for e in app.main.expander)
+    app.run()
+    widget(app.sidebar.selectbox, 'Open project').select(project.id).run()
+    assert widget(app.text_area, 'Working copy').value == 'Unsaved working text'
+    assert widget(app.text_area, 'Task / instructions').value == 'Unsaved task'
+    assert widget(app.text_area, 'Custom format / instructions').value == 'Unsaved format'
+    assert widget(app.multiselect, 'Models').value == ['author/free']
+    assert widget(app.number_input, 'Maximum output tokens per model').value == 2048
+    widget(app.sidebar.button, 'Rename').click().run()
+    widget(app.sidebar.text_input, 'New project name').set_value('Renamed project')
+    widget(app.sidebar.button, 'Save name').click().run()
+    assert not app.exception
+    assert app.subheader[0].value == 'Renamed project'
+    assert get_project(review_environment, project.id).name == 'Renamed project'
+    assert project_graph(review_environment, project.id) == graph
+    assert widget(app.text_area, 'Working copy').value == 'Unsaved working text'
+
+
+def test_confirmed_delete_returns_home_and_preserves_other_project(review_environment):
+    from test_db import seed_project_graph, project_graph
+    from app.db import list_projects
+    other = seed_project_graph(review_environment, 'Keep')
+    selected = seed_project_graph(review_environment, 'Delete')
+    graph = project_graph(review_environment, other.id)
+    app = AppTest.from_file(str(UI_PATH)).run()
+    widget(app.sidebar.button, 'Delete project').click().run()
+    assert get_project(review_environment, selected.id) is not None
+    assert any('all its local data/history' in w.value for w in app.warning)
+    widget(app.sidebar.button, 'Cancel deletion').click().run()
+    assert get_project(review_environment, selected.id) is not None
+    widget(app.sidebar.button, 'Delete project').click().run()
+    widget(app.sidebar.button, 'Confirm delete project').click().run()
+    assert not app.exception
+    assert app.session_state['project_id'] is None
+    assert app.title[0].value == 'Multi-LLM Workspace'
+    assert get_project(review_environment, selected.id) is None
+    assert project_graph(review_environment, other.id) == graph
+    assert [p.id for p in list_projects(review_environment)] == [other.id]
+    assert not any('Delete (#' in option for option in widget(app.sidebar.selectbox, 'Open project').options)

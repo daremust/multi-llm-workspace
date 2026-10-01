@@ -4,11 +4,21 @@ gatherUsageStats = false
 [server]
 address = "127.0.0.1"
 
-
+# Switchable palettes require Streamlit 1.51+. Leave base unset so a fresh
+# browser follows System; native appearance controls retain user overrides.
 [theme]
-base = "light"
 font = "monospace"
+
+[theme.light]
 primaryColor = "#165dff"
 backgroundColor = "#ffffff"
 secondaryBackgroundColor = "#f4f6fa"
 textColor = "#101626"
+linkColor = "#165dff"
+
+[theme.dark]
+primaryColor = "#7aa2ff"
+backgroundColor = "#10141c"
+secondaryBackgroundColor = "#1b2230"
+textColor = "#e7ebf3"
+linkColor = "#7aa2ff"

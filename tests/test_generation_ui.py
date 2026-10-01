@@ -89,7 +89,7 @@ def test_explicit_generation_reruns_and_reopen(app_environment, ui_project, cata
     assert requests[0].response.text == 'Generated text'
     assert requests[1].status == 'interrupted'
     assert any('uncertain' in caption.value for caption in app.caption)
-    assert any('Reported cost: unknown' in caption.value for caption in app.caption)
+    assert any('Cost unknown' in caption.value for caption in app.caption)
     assert 'ui-test-key' not in str(app)
     app.run()
     widget(app.checkbox, 'Free token pricing only').check().run()
@@ -120,8 +120,25 @@ def test_unknown_cost_and_catalog_failure_do_not_generate(app_environment, ui_pr
     monkeypatch.setattr('app.openrouter.OpenRouter.catalog', fail)
     widget(app.button, 'Load / refresh model catalog').click().run()
     assert not app.exception
-    assert any(error.value == 'Catalog unavailable' for error in app.error)
+    assert any(error.value == 'Model catalog unavailable: Catalog unavailable' for error in app.error)
     assert not app.multiselect
     app.run()
     assert not app.error  # Failed fetch is not automatically retried on rerun.
     assert list_generation_runs(app_environment, ui_project.id) == []
+
+
+def test_collapsed_generation_summary_retains_cost_and_parameters(app_environment, ui_project, catalog_mock, monkeypatch):
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'test-key')
+    app = AppTest.from_file(str(UI_PATH)).run()
+    widget(app.button, 'Load / refresh model catalog').click().run()
+    widget(app.multiselect, 'Models').set_value(['author/unknown']).run()
+    widget(app.number_input, 'Maximum output tokens per model').set_value(2048).run()
+    app.run()
+    section = next(e for e in app.expander if e.label.startswith('03  GENERATE'))
+    assert not section.proto.expanded
+    assert '1 API call' in section.label and 'cost: unknown' in section.label
+    assert widget(app.number_input, 'Maximum output tokens per model').value == 2048
+    assert widget(app.multiselect, 'Models').value == ['author/unknown']
+    assert catalog_mock == ['catalog']
+    assert list_generation_runs(app_environment, ui_project.id) == []
+    assert not app.exception

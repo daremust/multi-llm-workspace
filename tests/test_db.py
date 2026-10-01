@@ -89,3 +89,76 @@ def test_schema_enforces_manual_provenance(database_path):
         with connect(database_path) as connection:
             connection.execute("UPDATE responses SET verified_provider = 'openrouter'")
 
+
+
+def project_graph(path, project_id):
+    tables = ('sources', 'runs', 'run_requests', 'responses', 'versions', 'project_events')
+    with connect(path) as connection:
+        return {table: [dict(row) for row in connection.execute(
+            f'SELECT * FROM {table} WHERE project_id = ? ORDER BY id', (project_id,))] for table in tables}
+
+
+def seed_project_graph(path, name):
+    from app.db import add_text_source, add_manual_response, list_run_requests
+    from app.review import select_primary_response, save_review_version, rate_response
+    from test_review import seed_run
+    project = create_project(path, name)
+    add_text_source(path, project.id, 'Immutable source', 'Source')
+    add_manual_response(path, project.id, 'External response')
+    run = seed_run(path, project.id, 2)
+    child = seed_run(path, project.id, 1)
+    with connect(path) as connection:
+        connection.execute('UPDATE runs SET parent_run_id = ? WHERE id = ?', (run, child))
+    response = list_run_requests(path, run)[0].response
+    select_primary_response(path, project.id, response.id)
+    rate_response(path, project.id, response.id, 4)
+    base = save_review_version(path, project.id, response.id, 'First version')
+    save_review_version(path, project.id, response.id, 'Second version', base)
+    return project
+
+
+def test_rename_preserves_identity_and_owned_graph(database_path):
+    from app.db import rename_project
+    project = seed_project_graph(database_path, 'Before')
+    before = get_project(database_path, project.id)
+    graph = project_graph(database_path, project.id)
+    rename_project(database_path, project.id, '  After  ')
+    renamed = get_project(database_path, project.id)
+    assert renamed.name == 'After'
+    assert renamed.id == before.id and renamed.created_at == before.created_at
+    assert renamed.current_version_id == before.current_version_id
+    assert project_graph(database_path, project.id) == graph
+    for name in ('', '  ', 'x' * 201):
+        with pytest.raises(ValidationError):
+            rename_project(database_path, project.id, name)
+    assert get_project(database_path, project.id) == renamed
+
+
+def test_delete_removes_only_selected_ownership_graph(database_path):
+    from app.db import delete_project
+    selected = seed_project_graph(database_path, 'Delete me')
+    other = seed_project_graph(database_path, 'Keep me')
+    before = get_project(database_path, other.id)
+    graph = project_graph(database_path, other.id)
+    delete_project(database_path, selected.id)
+    assert get_project(database_path, selected.id) is None
+    assert all(not rows for rows in project_graph(database_path, selected.id).values())
+    assert get_project(database_path, other.id) == before
+    assert project_graph(database_path, other.id) == graph
+    with connect(database_path) as connection:
+        assert connection.execute('PRAGMA foreign_key_check').fetchall() == []
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == 1
+        assert connection.execute('PRAGMA foreign_keys').fetchone()[0] == 1
+
+
+def test_delete_failure_rolls_back_every_table(database_path):
+    from app.db import delete_project
+    project = seed_project_graph(database_path, 'Atomic delete')
+    before = get_project(database_path, project.id)
+    graph = project_graph(database_path, project.id)
+    with connect(database_path) as connection:
+        connection.execute("CREATE TRIGGER prevent_source_delete BEFORE DELETE ON sources BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+    with pytest.raises(sqlite3.IntegrityError):
+        delete_project(database_path, project.id)
+    assert get_project(database_path, project.id) == before
+    assert project_graph(database_path, project.id) == graph

@@ -218,3 +218,18 @@ def test_truncated_fact_check_diagnostic_no_retry(app_environment, optional_ui_e
     assert len(calls) == 1
     assert calls[0]['max_tokens'] == 2048
     assert ('response_format' in calls[0]) == (operation == 'fact_check')
+
+
+def test_fact_check_evidence_disclosed_without_hiding_claim_or_failure(optional_ui_environment, ui_http):
+    _, source, _, _, app = optional_ui_environment
+    result = fact_result(source.id)
+    calls = ui_http(json.dumps(result))
+    widget(app.selectbox, 'Optional operation').select('fact_check').run()
+    widget(app.selectbox, 'Optional operation model').select('author/free').run()
+    widget(app.button, 'Run Fact check · sources only').click().run()
+    assert not app.exception
+    assert any(t.value == result['claims'][0]['claim'] for t in app.text)
+    details = next(e for e in app.expander if e.label == 'Explanation and sources · claim 1')
+    assert not details.proto.expanded
+    assert any(t.value == result['claims'][0]['references'][0]['excerpt'] for t in details.text)
+    assert len(calls) == 1

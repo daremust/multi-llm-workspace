@@ -11,6 +11,7 @@ from app.review import (
     select_primary_response, set_current_version,
 )
 from app.types import RunRequest
+from app.ui_style import status_label
 
 
 def _cost(value: float | None) -> str:
@@ -20,15 +21,6 @@ def _cost(value: float | None) -> str:
 def render_comparison(database_path: Path, project_id: int, requests: list[RunRequest]) -> None:
     primary = get_primary_response(database_path, project_id)
     st.caption('Human review only · No API calls. Ratings do not reorder or select responses.')
-    st.markdown('''<style>
-    /* A single readable row: three desktop columns, horizontal scrolling beyond that. */
-    .st-key-review_comparison [data-testid="stHorizontalBlock"] {
-        flex-wrap: nowrap; overflow-x: auto; align-items: stretch; padding-bottom: .75rem;
-    }
-    .st-key-review_comparison [data-testid="stColumn"] {
-        min-width: min(20rem, 80vw); flex: 1 0 0;
-    }
-    </style>''', unsafe_allow_html=True)
     if not requests:
         st.caption('This run has no saved requests.')
         return
@@ -36,7 +28,6 @@ def render_comparison(database_path: Path, project_id: int, requests: list[RunRe
         for column, request in zip(st.columns(len(requests)), requests):
             with column:
                 render_response(database_path, project_id, request, primary.id if primary else None)
-    render_editor(database_path, project_id)
 
 
 def render_response(database_path: Path, project_id: int, request: RunRequest, primary_id: int | None, *,
@@ -44,22 +35,23 @@ def render_response(database_path: Path, project_id: int, request: RunRequest, p
     response = request.response
     metadata = json.loads(response.generation_metadata_json) if response else {}
     name = metadata.get('catalog_name') or request.requested_model.split('/', 1)[-1]
-    status = 'uncertain / interrupted' if request.status == 'interrupted' else request.status
+    status = status_label(request.status)
     st.write(f'{name} · {"✓" if request.status == "succeeded" else status}')
     if response and response.id == primary_id:
-        st.caption('Primary · selected by you')
+        st.caption('Primary response · selected by you')
     latency = f'{request.latency_ms / 1000:.1f}s' if request.latency_ms is not None else 'latency unknown'
     tokens = (f'{request.input_tokens + request.output_tokens:,} tok'
               if request.input_tokens is not None and request.output_tokens is not None else 'tokens unknown')
     namespace = metadata.get('model_namespace') or request.requested_model.partition('/')[0]
-    st.caption(f'{namespace} · {latency} · {tokens} · {_cost(request.cost_usd)}')
+    cost = 'Cost unknown' if request.cost_usd is None else f'Actual cost: {_cost(request.cost_usd)}'
+    st.caption(f'{namespace} · {latency} · {tokens} · {cost}')
     if request.error_message:
         st.error(request.error_message)
     with st.expander('Details'):
         st.caption(f'Gateway: {response.verified_provider if response else "OpenRouter"} · Request #{request.id} · {status}')
         st.caption(f'Input tokens: {request.input_tokens if request.input_tokens is not None else "unknown"} · '
                    f'Output tokens: {request.output_tokens if request.output_tokens is not None else "unknown"} · '
-                   f'Reported cost: {_cost(request.cost_usd)} · Latency: {latency}')
+                   f'{cost} · Latency: {latency}')
         st.json({
             'requested_model': request.requested_model,
             'reported_model': response.verified_model if response else None,
@@ -117,7 +109,8 @@ def render_editor(database_path: Path, project_id: int) -> None:
             st.session_state[draft_key] = base.text if base else primary.text
         edited = st.text_area('Working copy', value=st.session_state[draft_key], height=300,
                               key=widget_key, on_change=_keep_draft, args=(widget_key, draft_key))
-        st.caption('Original responses stay unchanged. Unsaved edits stay in this browser session; save a version to preserve them across restarts.')
+        state = 'Unsaved Working copy edits. ' if edited != (base.text if base else primary.text) else ''
+        st.caption(state + 'Original responses stay unchanged. Unsaved edits stay in this browser session; save a version to preserve them across restarts.')
         save = st.button('Save version', key=f'save_version_{project_id}')
         finish = st.button('Finish / Save', key=f'finish_review_{project_id}')
         if save or finish:
@@ -127,8 +120,8 @@ def render_editor(database_path: Path, project_id: int) -> None:
                 st.error(str(exc))
             else:
                 st.session_state[f'review_notice_{project_id}'] = (
-                    f'Finished · Version #{version_id} is the current saved output.' if finish
-                    else f'Version #{version_id} saved as current.'
+                    f'Finished · Current version: #{version_id}.' if finish
+                    else f'Saved version #{version_id} is now the Current version.'
                 )
                 st.rerun()
     if notice := st.session_state.get(f'review_notice_{project_id}'):
@@ -137,20 +130,21 @@ def render_editor(database_path: Path, project_id: int) -> None:
     if not versions:
         st.caption('No saved versions yet.')
         return
-    st.caption(f'Current saved output: version #{project.current_version_id}' if current else 'No current saved output.')
-    by_id = {version.id: version for version in versions}
-    version_id = st.selectbox('Saved version', list(by_id), key=f'history_{project_id}', format_func=lambda value:
-                             f'#{value} · {by_id[value].created_at:%Y-%m-%d %H:%M:%S UTC} · response #{by_id[value].derived_from_response_id}')
-    version = by_id[version_id]
-    with st.expander('Inspect saved version'):
-        st.caption(f'Operation: {version.operation} · Source response: {version.derived_from_response_id} · Base version: {version.derived_from_version_id}')
-        st.text(version.text)
-    if st.button('Set version as current', key=f'current_version_{project_id}', disabled=version.id == project.current_version_id):
-        set_current_version(database_path, project_id, version.id)
-        # Explicit version changes replace that version's cached draft and widget value.
-        # Ordinary reruns still preserve unsaved edits through _keep_draft.
-        target_draft = draft_state_key(project_id, version.derived_from_response_id, version.id)
-        st.session_state[target_draft] = version.text
-        st.session_state.pop(f'editor_{target_draft}', None)
-        st.session_state.pop(f'review_notice_{project_id}', None)
-        st.rerun()
+    st.caption(f'Current version: #{project.current_version_id}' if current else 'No Current version.')
+    with st.expander('Browse version history'):
+        by_id = {version.id: version for version in versions}
+        version_id = st.selectbox('Saved version', list(by_id), key=f'history_{project_id}', format_func=lambda value:
+                                 f'#{value} · {by_id[value].created_at:%Y-%m-%d %H:%M:%S UTC} · response #{by_id[value].derived_from_response_id}')
+        version = by_id[version_id]
+        with st.expander('Inspect saved version'):
+            st.caption(f'Operation: {version.operation} · Source response: {version.derived_from_response_id} · Base version: {version.derived_from_version_id}')
+            st.text(version.text)
+        if st.button('Set version as current', key=f'current_version_{project_id}', disabled=version.id == project.current_version_id):
+            set_current_version(database_path, project_id, version.id)
+            # Explicit version changes replace that version's cached draft and widget value.
+            # Ordinary reruns still preserve unsaved edits through _keep_draft.
+            target_draft = draft_state_key(project_id, version.derived_from_response_id, version.id)
+            st.session_state[target_draft] = version.text
+            st.session_state.pop(f'editor_{target_draft}', None)
+            st.session_state.pop(f'review_notice_{project_id}', None)
+            st.rerun()

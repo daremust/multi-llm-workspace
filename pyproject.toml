@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A local, human-guided workspace for comparing model responses."
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "streamlit>=1.40,<2",
+    "streamlit>=1.51,<2",
     "pydantic>=2.10,<3",
     "httpx>=0.28,<1",
     "python-dotenv>=1,<2",

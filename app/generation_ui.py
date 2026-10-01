@@ -7,6 +7,8 @@ from pathlib import Path
 import streamlit as st
 from pydantic import SecretStr
 
+from app.ui_style import status_label
+
 from app.db import list_generation_runs, list_run_requests
 from app.generation import generate, prepare_generation
 from app.openrouter import CATALOG_TTL_SECONDS, Catalog, CatalogModel, OpenRouter, OpenRouterError, price
@@ -33,25 +35,22 @@ def model_label(model: CatalogModel) -> str:
 
 
 def render_generation(database_path: Path, project_id: int, api_key: SecretStr | None) -> None:
-    st.markdown('<div class="stage-arrow" aria-hidden="true">↓</div>', unsafe_allow_html=True)
-    st.markdown('### MODEL SELECTION → GENERATE')
     st.caption('Select the models yourself. Generate sends saved sources, task, and output format to OpenRouter. Unsaved edits are excluded.')
     if api_key is None:
         st.caption('OPENROUTER_API_KEY is not configured. Add it to your environment or .env to generate; local inputs and saved results remain available.')
     if st.button('Load / refresh model catalog', key=f'catalog_refresh_{project_id}'):
         cached_catalog.clear()
         try:
-            with st.spinner('Loading model catalog…'):
+            with st.spinner('Loading models…'):
                 st.session_state['loaded_catalog'] = cached_catalog()
         except OpenRouterError as exc:
-            st.error(str(exc))
+            st.error(f'Model catalog unavailable: {exc}')
             st.session_state.pop('loaded_catalog', None)
     # Review reruns must never refresh an expired network cache implicitly.
     if catalog := st.session_state.get('loaded_catalog'):
         render_selector(database_path, project_id, api_key, catalog)
     else:
         st.caption('Load the public catalog to see available models and current prices. This does not generate model output.')
-    render_results(database_path, project_id)
 
 
 def render_selector(database_path: Path, project_id: int, api_key: SecretStr | None, catalog: Catalog) -> None:
@@ -110,13 +109,13 @@ def render_selector(database_path: Path, project_id: int, api_key: SecretStr | N
         st.caption('Estimated cost: unknown — select models and save complete inputs first.')
     if st.button('Generate', type='primary', disabled=api_key is None or plan is None, key=f'generate_{project_id}'):
         try:
-            with st.spinner('Generating independently through OpenRouter…'):
+            with st.spinner(f'Generating with {len(selected)} models through OpenRouter…'):
                 run_id = generate(database_path, plan, OpenRouter(api_key))
         except ValueError as exc:
             st.error(str(exc))
         else:
             st.session_state[f'run_{project_id}'] = run_id
-            st.caption(f'Run #{run_id} saved. Outcomes are shown below; no requests were automatically retried.')
+            st.caption(f'Run #{run_id} saved. Outcomes are shown in Compare; no requests were automatically retried.')
 
 
 def render_results(database_path: Path, project_id: int) -> None:
@@ -129,7 +128,7 @@ def render_results(database_path: Path, project_id: int) -> None:
     if st.session_state.get(key) not in by_id:
         st.session_state[key] = runs[0].id
     run_id = st.selectbox('Generation run', list(by_id), key=key,
-                          format_func=lambda value: f'Run #{value} · {by_id[value].status} · {by_id[value].created_at:%Y-%m-%d %H:%M UTC}')
+                          format_func=lambda value: f'Run #{value} · {status_label(by_id[value].status)} · {by_id[value].created_at:%Y-%m-%d %H:%M UTC}')
     run = by_id[run_id]
     if run.status in {'pending', 'running'}:
         st.warning('This run is unfinished or still running. If the app stopped, completion and billing may be uncertain. It will not be resumed or retried automatically.')
