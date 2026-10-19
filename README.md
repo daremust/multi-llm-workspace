@@ -1,8 +1,8 @@
 # Multi-LLM Workspace
 
-Multi-LLM Workspace is a local-first, human-guided workspace for comparing independent outputs from multiple language models and using additional compute only when it is useful.
+Compare multiple AI models, review their outputs, and refine your results with optional critique, source verification, merging, and rewriting.
 
-**Multiple models for breadth. Additional compute only when the user asks for depth.**
+**Multiple models for different perspectives. Additional compute only when you ask for depth.**
 
 ## Workflow
 
@@ -40,10 +40,8 @@ OpenRouter usage belongs to your own OpenRouter account. ChatGPT Plus, Claude Pr
 
 ## Quick start — macOS / Linux
 
-Replace `<PUBLIC_REPOSITORY_URL>` with the public repository URL once it is available. The placeholder below is not a working clone URL.
-
 ```sh
-git clone <PUBLIC_REPOSITORY_URL>
+git clone https://github.com/daremust/multi-llm-workspace.git
 cd multi-llm-workspace
 
 python3.12 -m venv .venv
