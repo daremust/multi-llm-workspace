@@ -149,7 +149,3 @@ Tests use temporary SQLite databases and mocked API responses. Outbound network 
 - `app/db.py`, `app/schema.sql`: local SQLite persistence.
 - `tests/`: automated coverage.
 - `.streamlit/config.toml`, `.env.example`: appearance/local-server defaults and configuration template.
-
-## Before public release
-
-The public repository URL still needs to replace `<PUBLIC_REPOSITORY_URL>`. A license has not yet been selected or added; resolve that before describing the release as licensed open source. CI and dependency constraints remain separate release decisions.
