@@ -62,3 +62,38 @@ def test_outcome_labels_keep_failure_partial_and_uncertainty_distinct():
             ('pending', 'running', 'succeeded', 'partial', 'failed', 'interrupted')] == [
         'Pending', 'Running', 'Succeeded', 'Partial', 'Failed', 'Interrupted / uncertain',
     ]
+
+
+def test_section_identity_stable_until_explicit_reveal():
+    from streamlit.testing.v1 import AppTest
+
+    def preview():
+        import streamlit as st
+        from app.ui_style import workspace_section
+        state = st.text_input('Summary', 'Initial')
+        if st.button('Reveal Final'):
+            key = 'section_reveal_1_final'
+            st.session_state[key] = st.session_state.get(key, 0) + 1
+        for name in ('optional', 'final'):
+            with workspace_section(name.upper(), state, 1, name):
+                st.write('Section contents')
+
+    app = AppTest.from_function(preview).run()
+    def containers():
+        return [b.proto.id for b in app.get('flex_container') if 'workspace_section_' in b.proto.id]
+    initial = containers()
+    assert len(initial) == 2
+    assert all(not e.proto.expanded for e in app.expander)
+    app.text_input[0].set_value('Changed summary').run()
+    assert containers() == initial
+    assert [e.label for e in app.expander] == ['OPTIONAL', 'FINAL']
+    app.button[0].click().run()
+    revealed = containers()
+    assert revealed[0] == initial[0] and revealed[1] != initial[1]
+    assert not app.expander[0].proto.expanded and app.expander[1].proto.expanded
+    app.text_input[0].set_value('Another ordinary interaction').run()
+    assert containers() == revealed
+    assert app.expander[1].proto.expanded
+    app.button[0].click().run()
+    assert containers()[1] != revealed[1]
+    assert not app.exception

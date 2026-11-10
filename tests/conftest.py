@@ -33,3 +33,22 @@ def app_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "")
     return path
 
+
+
+@pytest.fixture
+def pricing_catalog():
+    """Representative pricing shapes from the reported catalog, without network access."""
+    from app.openrouter import parse_catalog
+    from test_openrouter import model_entry
+
+    shapes = {
+        'openai/gpt-6-luna': {'web_search': '0.01', 'overrides': [
+            {'min_prompt_tokens': 272000, 'prompt': '0.000002'}]},
+        '~anthropic/claude-sonnet-latest': {'web_search': '0.01', 'input_cache_write_1h': '0.000004'},
+        'google/gemini-3.8-flash': {'image': '0.000000825', 'audio': '0.000000825',
+                                  'internal_reasoning': '0.000004125', 'web_search': '0.014'},
+        'perplexity/sonar': {'web_search': '0.005'},
+    }
+    return parse_catalog({'data': [model_entry(model_id, pricing={
+        'prompt': '0.000001', 'completion': '0.000002', 'input_cache_read': '0.0000001', **extras,
+    }) for model_id, extras in shapes.items()]})

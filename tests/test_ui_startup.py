@@ -26,14 +26,16 @@ socket.getaddrinfo = no_network
 
 if sys.argv[1] == "preloaded":
     import app.generation_ui as generation_ui
-    # Reproduce an already-loaded module without the new Pass 2 export.
-    generation_ui.__dict__.pop("generation_summary", None)
+    # Reproduce the pre-cost-change module retained by a running Streamlit server.
+    for name in ("generation_summary", "estimate_summary", "render_estimate"):
+        generation_ui.__dict__.pop(name, None)
 
 from app.config import load_settings
 from app.db import initialize_database, create_project
 path = load_settings().database_path
 initialize_database(path)
 create_project(path, "Startup regression")
+import app.ui  # Import the actual entry point before executing it as a script.
 from streamlit.testing.v1 import AppTest
 app = AppTest.from_file(str(Path("app/ui.py").resolve())).run()
 assert not app.exception, str(app.exception)

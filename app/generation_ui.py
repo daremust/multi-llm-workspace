@@ -1,7 +1,6 @@
 """Compact model selection, explicit generation, and persisted result inspection."""
 
 import json
-from decimal import Decimal
 from pathlib import Path
 
 import streamlit as st
@@ -11,20 +10,13 @@ from app.ui_style import status_label
 
 from app.db import list_generation_runs, list_run_requests
 from app.generation import generate, prepare_generation
+from app.cost_ui import money, render_estimate
 from app.openrouter import CATALOG_TTL_SECONDS, Catalog, CatalogModel, OpenRouter, OpenRouterError, price
 
 
 @st.cache_data(ttl=CATALOG_TTL_SECONDS, show_spinner=False)
 def cached_catalog() -> Catalog:
     return OpenRouter().catalog()
-
-
-def money(value: Decimal | float | None) -> str:
-    if value is None:
-        return 'unknown'
-    if value == 0:
-        return '$0'
-    return f'${value:.8f}'.rstrip('0').rstrip('.') if value >= Decimal('0.00000001') else '<$0.00000001'
 
 
 def model_label(model: CatalogModel) -> str:
@@ -92,9 +84,7 @@ def render_selector(database_path: Path, project_id: int, api_key: SecretStr | N
     st.write(f'{len(selected)} models · {len(selected)} API calls per Generate')
     if plan is not None:
         estimate = plan.estimate
-        if estimate.token_cost_usd == 0:
-            st.write('Estimated token cost: $0')
-        st.write(f'Estimated cost: {money(estimate.cost_usd)}')
+        render_estimate(estimate)
         st.caption(f'Estimate uses ~{estimate.input_tokens:,} input tokens per call '
                    f'(UTF-8 message bytes ÷ 4 plus message overhead), up to {max_tokens:,} output tokens per model, '
                    'and catalog rates plus any request fee. This is not a spending cap; tokenization, routing, reasoning, '

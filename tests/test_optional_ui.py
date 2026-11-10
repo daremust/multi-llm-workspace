@@ -71,10 +71,10 @@ def test_explicit_operation_estimate_reruns_and_history(app_environment, optiona
         widget(app.multiselect, 'Inputs to merge').set_value([('response', responses[0].id)]).run()
         assert widget(app.button, 'Run Merge').disabled
         widget(app.multiselect, 'Inputs to merge').set_value([('response', response.id) for response in responses]).run()
-    assert any(item.value == 'Estimated additional cost: unknown' for item in app.markdown)
+    assert any(item.value == 'Total cost: unknown' for item in app.markdown)
     widget(app.selectbox, 'Optional operation model').select('author/free').run()
     assert any(item.value == 'Additional API calls: 1' for item in app.markdown)
-    assert any(item.value == 'Estimated additional cost: $0' for item in app.markdown)
+    assert any(item.value == 'Total cost: $0' for item in app.markdown)
     widget(app.text_area, 'Optional instructions').set_value('Keep it concise').run()
     if operation != 'merge':
         widget(app.text_area, 'Working copy').set_value('Unsaved working text').run()
@@ -120,6 +120,8 @@ def test_candidate_adoption_is_explicit_and_local(app_environment, optional_ui_e
     assert not app.exception
     adopted = get_project(app_environment, project.id).current_version_id
     assert adopted != version
+    assert next(e for e in app.expander if e.label == '05  FINAL').proto.expanded
+    assert app.session_state[f'section_reveal_{project.id}_final'] == 1
     assert get_primary_response(app_environment, project.id).id != responses[0].id
     assert widget(app.text_area, 'Working copy').value == 'Human edited candidate'
     assert len(calls) == 1
@@ -129,6 +131,12 @@ def test_candidate_adoption_is_explicit_and_local(app_environment, optional_ui_e
     assert not app.exception
     assert len(list_versions(app_environment, project.id)) == before
     assert len(calls) == 1
+    assert app.session_state[f'section_reveal_{project.id}_final'] == 2
+    widget(app.selectbox, 'Optional operation').select('critique').run()
+    assert next(e for e in app.expander if e.label == '05  FINAL').proto.expanded
+    assert app.session_state[f'section_reveal_{project.id}_final'] == 2
+    reopened = AppTest.from_file(str(UI_PATH)).run()
+    assert not next(e for e in reopened.expander if e.label == '05  FINAL').proto.expanded
 
 
 def test_invalid_structured_ui_shows_raw_and_does_not_repair(app_environment, optional_ui_environment, ui_http):
@@ -233,3 +241,29 @@ def test_fact_check_evidence_disclosed_without_hiding_claim_or_failure(optional_
     assert not details.proto.expanded
     assert any(t.value == result['claims'][0]['references'][0]['excerpt'] for t in details.text)
     assert len(calls) == 1
+
+
+def test_optional_reported_models_show_base_estimate_without_dispatch(
+        app_environment, optional_ui_environment, pricing_catalog, monkeypatch):
+    from app.cost_ui import UNKNOWN_TOTAL_WARNING, money
+    from app.optional_compute import prepare_optional_operation
+
+    project, _, responses, version, app = optional_ui_environment
+    def forbidden(*args, **kwargs):
+        pytest.fail('Estimate display must not generate')
+    monkeypatch.setattr('app.openrouter.OpenRouter.complete', forbidden)
+    app.session_state['loaded_catalog'] = pricing_catalog
+    app.run()
+    for model in pricing_catalog.models:
+        widget(app.selectbox, 'Optional operation model').select(model.id).run()
+        working_text = widget(app.text_area, 'Working copy').value
+        plan = prepare_optional_operation(app_environment, project.id, pricing_catalog,
+                                          model.id, 'rewrite', [('version', version)],
+                                          working_text=working_text)
+        assert any(item.value == f'Base-rate token estimate: {money(plan.estimate.token_cost_usd)}'
+                   for item in app.markdown)
+        assert any(item.value == 'Total cost: unknown' for item in app.markdown)
+        assert any(item.value == UNKNOWN_TOTAL_WARNING for item in app.warning)
+        assert not widget(app.button, 'Run Rewrite').disabled
+        assert not app.exception
+    assert list_optional_runs(app_environment, project.id) == []

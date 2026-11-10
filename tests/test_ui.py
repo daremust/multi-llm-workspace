@@ -95,7 +95,7 @@ def test_full_input_workspace_reopens_and_isolates_projects(app_environment):
     widget(reopened.sidebar.button, 'Create').click().run()
     assert widget(reopened.text_area, 'Task / instructions').value == ''
     assert not any(text.value in ('Original source', 'A manually obtained response') for text in reopened.text)
-    assert any('TASK & OUTPUT · Not configured' in e.label for e in reopened.expander)
+    assert any('Not configured' in c.value for c in reopened.caption)
     reopened.sidebar.selectbox[0].select(project.id).run()
     assert widget(reopened.text_area, 'Task / instructions').value == 'Summarize the sources'
     widget(reopened.selectbox, 'Output format').select('Email').run()
@@ -151,17 +151,17 @@ def test_progressive_disclosure_preserves_saved_and_unsaved_inputs(app_environme
     assert not app.exception
     for label in ('How this workspace works', '01  SOURCE', '02  TASK', 'Add / inspect manual responses'):
         assert not next(e for e in app.expander if e.label.startswith(label)).proto.expanded
-    assert any('TASK & OUTPUT · Saved task · Custom' in e.label for e in app.expander)
+    assert any('Saved task · Custom' in c.value for c in app.caption)
     widget(app.text_area, 'Task / instructions').set_value('Unsaved task').run()
     widget(app.text_area, 'Custom format / instructions').set_value('Unsaved format').run()
     app.run()
     assert widget(app.text_area, 'Task / instructions').value == 'Unsaved task'
     assert widget(app.text_area, 'Custom format / instructions').value == 'Unsaved format'
-    assert any('TASK & OUTPUT · Saved task · Custom' in e.label for e in app.expander)
+    assert any('Saved task · Custom' in c.value for c in app.caption)
     assert any('Unsaved task / format edits' in c.value for c in app.caption)
     assert get_project(app_environment, project.id).task == 'Saved task'
     widget(app.button, 'Save task and format').click().run()
-    assert any('TASK & OUTPUT · Unsaved task · Custom' in e.label for e in app.expander)
+    assert any('Unsaved task · Custom' in c.value for c in app.caption)
     assert get_project(app_environment, project.id).custom_output_format == 'Unsaved format'
     assert not any('Unsaved task / format edits' in c.value for c in app.caption)
 

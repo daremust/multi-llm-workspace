@@ -1,6 +1,7 @@
 """Small shared presentation layer; native Streamlit owns themes and controls."""
 
 import re
+from contextlib import contextmanager
 
 import streamlit as st
 
@@ -112,3 +113,18 @@ def status_label(status: str) -> str:
         'pending': 'Pending', 'running': 'Running', 'succeeded': 'Succeeded',
         'partial': 'Partial', 'failed': 'Failed', 'interrupted': 'Interrupted / uncertain',
     }.get(status, status)
+
+
+@contextmanager
+def workspace_section(title: str, state: str, project_id: int, name: str):
+    """Stable section identity using APIs available in Streamlit 1.51.
+
+    Changing labels reset browser-owned expansion. Keep summaries outside the
+    expander. Only an explicit reveal changes the container identity, allowing
+    repeated adoptions to open Final even after the user manually closes it.
+    """
+    reveal = st.session_state.get(f'section_reveal_{project_id}_{name}', 0)
+    with st.container(key=f'workspace_section_{project_id}_{name}_{reveal}'):
+        st.caption(state)
+        with st.expander(title, expanded=bool(reveal)):
+            yield

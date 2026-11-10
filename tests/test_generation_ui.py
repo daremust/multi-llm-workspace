@@ -52,7 +52,7 @@ def test_missing_key_catalog_free_filter_and_disabled_generation(app_environment
     widget(app.checkbox, 'Free token pricing only').check().run()
     assert len(widget(app.multiselect, 'Models').options) == 1
     widget(app.multiselect, 'Models').select('author/free').run()
-    assert any('Estimated token cost: $0' in entry.value for entry in app.markdown)
+    assert any('Base-rate token estimate: $0' in entry.value for entry in app.markdown)
     assert widget(app.button, 'Generate').disabled
     assert list_generation_runs(app_environment, ui_project.id) == []
     app.run()
@@ -114,7 +114,7 @@ def test_unknown_cost_and_catalog_failure_do_not_generate(app_environment, ui_pr
     app = AppTest.from_file(str(UI_PATH)).run()
     widget(app.button, 'Load / refresh model catalog').click().run()
     widget(app.multiselect, 'Models').select('author/unknown').run()
-    assert any(entry.value == 'Estimated cost: unknown' for entry in app.markdown)
+    assert any(entry.value == 'Total cost: unknown' for entry in app.markdown)
     def fail(self):
         raise OpenRouterError('Catalog unavailable')
     monkeypatch.setattr('app.openrouter.OpenRouter.catalog', fail)
@@ -136,9 +136,43 @@ def test_collapsed_generation_summary_retains_cost_and_parameters(app_environmen
     app.run()
     section = next(e for e in app.expander if e.label.startswith('03  GENERATE'))
     assert not section.proto.expanded
-    assert '1 API call' in section.label and 'cost: unknown' in section.label
+    assert section.label == '03  GENERATE'
+    assert any('1 API call' in c.value and 'cost: unknown' in c.value for c in app.caption)
     assert widget(app.number_input, 'Maximum output tokens per model').value == 2048
     assert widget(app.multiselect, 'Models').value == ['author/unknown']
     assert catalog_mock == ['catalog']
     assert list_generation_runs(app_environment, ui_project.id) == []
     assert not app.exception
+
+
+def test_reported_models_show_base_estimate_and_warning_without_dispatch(
+        app_environment, ui_project, pricing_catalog, monkeypatch):
+    from app.generation import prepare_generation
+    from app.cost_ui import UNKNOWN_TOTAL_WARNING, estimate_summary, money
+
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'test-key')
+    def forbidden(*args, **kwargs):
+        pytest.fail('Estimate display must not fetch or generate')
+    monkeypatch.setattr('app.openrouter.OpenRouter.catalog', forbidden)
+    monkeypatch.setattr('app.openrouter.OpenRouter.complete', forbidden)
+    save_project_inputs(app_environment, ui_project.id, 'Saved task', 'LinkedIn post')
+    app = AppTest.from_file(str(UI_PATH))
+    app.session_state['loaded_catalog'] = pricing_catalog
+    app.run()
+    ids = [model.id for model in pricing_catalog.models]
+    selections = [[model_id] for model_id in ids] + [
+        ['openai/gpt-6-luna', '~anthropic/claude-sonnet-latest'], ids]
+    for selected in selections:
+        widget(app.multiselect, 'Models').set_value(selected).run()
+        app.run()  # The section heading is computed before the selector on each rerun.
+        plan = prepare_generation(app_environment, ui_project.id, pricing_catalog, selected)
+        assert any(entry.value == f'Base-rate token estimate: {money(plan.estimate.token_cost_usd)}'
+                   for entry in app.markdown)
+        assert any(entry.value == 'Total cost: unknown' for entry in app.markdown)
+        assert any(entry.value == UNKNOWN_TOTAL_WARNING for entry in app.warning)
+        section = next(e for e in app.expander if e.label.startswith('03  GENERATE'))
+        assert section.label == '03  GENERATE'
+        assert any(estimate_summary(plan.estimate) in c.value for c in app.caption)
+        assert not widget(app.button, 'Generate').disabled
+        assert not app.exception
+    assert list_generation_runs(app_environment, ui_project.id) == []

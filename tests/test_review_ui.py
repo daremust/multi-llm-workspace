@@ -161,7 +161,8 @@ def test_workspace_hierarchy_keeps_review_state_on_reruns(review_environment):
     assert [e.label.split(' · ')[0] for e in sections] == [
         '01  SOURCE OF TRUTH', '02  TASK & OUTPUT', '03  GENERATE', '04  COMPARE', 'OPTIONAL COMPUTE', '05  FINAL']
     assert all(not e.proto.expanded for e in sections)
-    assert 'Partial' in sections[3].label and 'Cost unknown' in sections[3].label
+    assert sections[3].label == '04  COMPARE'
+    assert any('Partial' in c.value and 'Cost unknown' in c.value for c in app.caption)
     assert len([b for b in sections[3].button if b.label == 'Set as primary']) == 3
     assert not any(t.label == 'Working copy' for t in sections[3].text_area)
     assert widget(sections[5].text_area, 'Working copy').value == 'Saved version'

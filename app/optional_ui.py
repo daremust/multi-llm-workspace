@@ -8,13 +8,14 @@ from pydantic import SecretStr
 
 from app.db import get_project, list_optional_runs, list_run_requests
 from app.generation import generate
-from app.generation_ui import cached_catalog, model_label, money
+from app.generation_ui import cached_catalog, model_label
+from app.cost_ui import render_estimate
 from app.openrouter import OpenRouter, OpenRouterError
 from app.optional_compute import default_output_tokens, draft_inputs, prepare_optional_operation
 from app.optional_prompts import OPERATIONS
 from app.review import adopt_candidate, get_primary_response, list_versions
 from app.review_ui import draft_state_key, render_response
-from app.ui_style import section_label, status_label
+from app.ui_style import workspace_section, status_label
 
 LABELS = {'rewrite': 'Rewrite', 'merge': 'Merge', 'critique': 'Critique', 'fact_check': 'Fact check · sources only'}
 
@@ -24,7 +25,7 @@ def render_optional_compute(database_path: Path, project_id: int, api_key: Secre
     state = f"Latest run #{runs[0].id} · {status_label(runs[0].status)}" if runs else "Only when needed"
     if runs and any(request.cost_usd is None for request in list_run_requests(database_path, runs[0].id)):
         state += " · Cost unknown"
-    with st.expander(section_label("OPTIONAL COMPUTE", state)):
+    with workspace_section("OPTIONAL COMPUTE", state, project_id, "optional"):
         st.caption('Additional compute only when you ask. One request per operation; no chaining, automatic retries, or automatic adoption.')
         render_controls(database_path, project_id, api_key)
         render_optional_history(database_path, project_id)
@@ -98,8 +99,8 @@ def render_controls(database_path: Path, project_id: int, api_key: SecretStr | N
     else:
         st.caption('Load the catalog and explicitly choose the model for this operation.')
     st.write('Additional API calls: 1')
-    st.write(f'Estimated additional cost: {money(plan.estimate.cost_usd if plan else None)}')
     if plan:
+        render_estimate(plan.estimate)
         if operation == 'fact_check':
             if plan.parameters['fact_check_output_mode'] == 'json_schema':
                 st.caption('API-level JSON Schema: the catalog advertises structured-output support. '
@@ -109,8 +110,6 @@ def render_controls(database_path: Path, project_id: int, api_key: SecretStr | N
                 st.caption('Prompt-only / best-effort structured-output compatibility: JSON Schema support '
                            'is unavailable or unknown in the catalog. One request with local schema and '
                            'source-reference validation; no repair, retry, or fallback.')
-        if plan.estimate.token_cost_usd == 0:
-            st.caption('Estimated token cost: $0')
         st.caption(f'Estimate: ~{plan.estimate.input_tokens:,} input tokens (UTF-8 bytes ÷ 4 plus message overhead) '
                    f'and up to {plan.estimate.max_output_tokens:,} output tokens, using catalog prices and request fees. '
                    'Not a spending cap; actual tokenization, reasoning, routing, fees, or prices can differ.')
@@ -166,6 +165,8 @@ def render_optional_history(database_path: Path, project_id: int) -> None:
                     st.session_state[target] = text
                     st.session_state.pop(f'editor_{target}', None)
                     st.session_state[f'review_notice_{project_id}'] = f'Candidate adopted as current version #{version_id}.'
+                    reveal_key = f'section_reveal_{project_id}_final'
+                    st.session_state[reveal_key] = st.session_state.get(reveal_key, 0) + 1
                     st.rerun()
         elif response.structured_result_json:
             result = json.loads(response.structured_result_json)

@@ -123,6 +123,8 @@ API-level JSON Schema is requested only when catalog metadata advertises structu
 
 Initial generation makes one request per selected model. Optional Compute adds its own request. Estimates use catalog prices, request fees, an approximate input-token count, and the configured output limit. They are **not a spending cap**; tokenization, reasoning, routing, fees, and prices can differ.
 
+Generate, its collapsed summary, and Optional Compute show a base-rate token estimate whenever the selected models have valid input/output token prices. This excludes fee and pricing-tier adjustments. Missing or malformed pricing, unresolved fees, or tier overrides keep the total unknown; a warning is shown, and generation remains available with valid inputs and an API key.
+
 Actual/provider-reported usage and cost are shown when available. **Cost unknown stays unknown, never zero.** Free-token pricing does not guarantee that all fees are known or that a model is available.
 
 Catalog loading is explicit and cached for 15 minutes. Execution requires a fresh catalog. UI reruns do not automatically refresh the catalog or rerun completed operations.

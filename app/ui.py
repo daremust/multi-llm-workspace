@@ -16,10 +16,11 @@ from app.db import (
     list_generation_runs, list_run_requests,
 )
 from app.types import OUTPUT_FORMATS, Project
-from app.generation_ui import render_generation, render_results, money
+from app.generation_ui import render_generation, render_results
+from app.cost_ui import estimate_summary
 from app.generation import prepare_generation
 from app.optional_ui import render_optional_compute
-from app.ui_style import apply_style, render_workflow, summary, section_label, status_label
+from app.ui_style import apply_style, render_workflow, summary, workspace_section, status_label
 from app.review_ui import render_editor
 from app.review import get_primary_response
 
@@ -37,7 +38,7 @@ def generation_summary(database_path: Path, project_id: int, api_key: SecretStr 
         except ValueError:
             state = f'{len(selected)} models · Check inputs / catalog before generating'
         else:
-            state = f'{len(selected)} API call{"s" if len(selected) != 1 else ""} · Estimated cost: {money(plan.estimate.cost_usd)}'
+            state = f'{len(selected)} API call{"s" if len(selected) != 1 else ""} · {estimate_summary(plan.estimate)}'
     if api_key is None:
         state += ' · API key not configured'
     return state
@@ -136,7 +137,7 @@ window.addEventListener('unload', () => observer.disconnect());
 def workspace_state_key(key: str, project_id: int | None = None) -> bool:
     pid = str(project_id) if project_id is not None else r'\d+'
     return bool(re.fullmatch(
-        rf'(project_{pid}_(task|format|custom|input_notice)|'
+        rf'(section_reveal_{pid}_[a-z]+|project_{pid}_(task|format|custom|input_notice)|'
         rf'(models|max_tokens|temperature|free_models|run|history|review_notice|merge_inputs)_{pid}|'
         rf'optional_(operation|model|free|temperature|history)_{pid}|'
         rf'optional_(input|instructions|max_tokens)_{pid}_[a-z_]+|'
@@ -272,7 +273,7 @@ def render_tip() -> None:
 def render_workspace(database_path: Path, project: Project, api_key: SecretStr | None = None) -> None:
     prefix = f"project_{project.id}"
     sources = list_sources(database_path, project.id)
-    with st.expander(section_label("01  SOURCE OF TRUTH", f"{len(sources)} sources saved")):
+    with workspace_section("01  SOURCE OF TRUTH", f"{len(sources)} sources saved", project.id, "sources"):
         st.caption("Inspect original sources or add source material.")
         if not sources:
             st.write("No sources yet. Add your first source below.")
@@ -315,7 +316,7 @@ def render_workspace(database_path: Path, project: Project, api_key: SecretStr |
                         st.rerun()
 
     task_summary = (summary(project.task, 64) or "Not configured") + " · " + project.output_format
-    with st.expander(section_label("02  TASK & OUTPUT", task_summary)):
+    with workspace_section("02  TASK & OUTPUT", task_summary, project.id, "task"):
         st.caption("Saved state is shown above. Save task and format together before generating with edits.")
         task = st.text_area("Task / instructions", value=project.task, key=f"{prefix}_task", height=150)
         output = st.selectbox("Output format", OUTPUT_FORMATS,
@@ -338,7 +339,7 @@ def render_workspace(database_path: Path, project: Project, api_key: SecretStr |
         elif notice := st.session_state.get(f"{prefix}_input_notice"):
             st.caption(notice)
 
-    with st.expander(section_label("03  GENERATE", generation_summary(database_path, project.id, api_key))):
+    with workspace_section("03  GENERATE", generation_summary(database_path, project.id, api_key), project.id, "generate"):
         render_generation(database_path, project.id, api_key)
 
     runs = list_generation_runs(database_path, project.id)
@@ -351,7 +352,7 @@ def render_workspace(database_path: Path, project: Project, api_key: SecretStr |
             compare_summary += " · Cost unknown"
     else:
         compare_summary = "No generation runs yet"
-    with st.expander(section_label("04  COMPARE", compare_summary)):
+    with workspace_section("04  COMPARE", compare_summary, project.id, "compare"):
         render_results(database_path, project.id)
         if not runs:
             st.caption("Generate responses to compare. Manual external responses remain available below.")
@@ -365,7 +366,7 @@ def render_workspace(database_path: Path, project: Project, api_key: SecretStr |
     primary = get_primary_response(database_path, project.id)
     if primary:
         final_summary += f" · primary response #{primary.id}"
-    with st.expander(section_label("05  FINAL", final_summary)):
+    with workspace_section("05  FINAL", final_summary, project.id, "final"):
         render_editor(database_path, project.id)
 
 

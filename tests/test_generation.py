@@ -245,3 +245,35 @@ def test_concurrent_dispatch_claims_run_once(database_path, saved_project, mock_
     assert sorted(asyncio.run(run())) == [False, True]
     assert len(calls) == 1
     assert get_generation_run(database_path, run_id).status == 'succeeded'
+
+
+def test_reported_pricing_shapes_keep_base_estimate(pricing_catalog):
+    models = list(pricing_catalog.models)
+    for selection in [[model] for model in models] + [models, models[:2]]:
+        estimate = estimate_cost(selection, [{'role': 'user', 'content': 'abcd'}], 100)
+        assert estimate.token_cost_usd == Decimal('0.000209') * len(selection)
+        assert estimate.cost_usd is None
+
+
+@pytest.mark.parametrize('extra', [
+    {}, {'request': None}, {'request': 'bad'}, {'request': '-1'},
+    {'request': '0', 'unknown_fee': '0.01'},
+    {'request': '0', 'unknown_fee': None},
+    {'request': '0', 'overrides': [{'min_prompt_tokens': 1, 'prompt': '0.01'}]},
+])
+def test_unresolved_fees_never_erase_valid_base_estimate(extra):
+    model = parse_catalog({'data': [model_entry(pricing={
+        'prompt': '0.001', 'completion': '0.002', **extra,
+    })]}).models[0]
+    estimate = estimate_cost([model], [{'role': 'user', 'content': 'abcd'}], 100)
+    assert estimate.token_cost_usd == Decimal('0.209')
+    assert estimate.cost_usd is None
+
+
+@pytest.mark.parametrize('value', [None, '', 'bad', '-1', 'NaN', 'Infinity', True])
+@pytest.mark.parametrize('field', ['prompt', 'completion'])
+def test_invalid_token_price_does_not_become_zero(field, value):
+    pricing = {'prompt': '0.001', 'completion': '0.002', 'request': '0', field: value}
+    model = parse_catalog({'data': [model_entry(pricing=pricing)]}).models[0]
+    assert estimate_cost([model], [], 100).token_cost_usd is None
+    assert estimate_cost([model], [], 100).cost_usd is None
