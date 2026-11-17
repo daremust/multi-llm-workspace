@@ -7,7 +7,7 @@ Compare multiple AI models, review their outputs, and refine your results with o
 ## Workflow
 
 ```text
-Sources + Task & Output
+Optional sources + Task & Output
 ↓
 Generate with selected models
 ↓
@@ -35,6 +35,8 @@ Human review is intentional: the application does not automatically rank models,
 - **Python 3.12.x**. The current package requires `>=3.12,<3.13`; newer Python versions are not currently supported.
 - Git and a modern web browser.
 - An OpenRouter account and API key for model operations, including free models. Local project work and saved results need no key.
+
+The v0.1.0 release candidate was tested with **Python 3.12.14 and Streamlit 1.51.0 / 1.64.0**, including automated tests and Chrome navigation checks. The declared requirements remain Python `>=3.12,<3.13` and Streamlit `>=1.51,<2`.
 
 OpenRouter usage belongs to your own OpenRouter account. ChatGPT Plus, Claude Pro, and other consumer subscriptions do not pay for these API requests.
 
@@ -67,7 +69,7 @@ streamlit run app/ui.py
 
 Open [127.0.0.1:8501](http://127.0.0.1:8501) if the browser does not open automatically. The app binds to your computer's loopback address. Stop it with Ctrl+C; saved SQLite data remains available next time.
 
-Create a project in the sidebar, save your Source of Truth and Task & Output, then explicitly load the catalog and choose models. Review the API call count, estimated cost, and saved-input preview before Generate. Generation uses saved inputs, excluding unsaved input edits and manual responses.
+Create a project in the sidebar, save your Task & Output, optionally add sources, then explicitly load the catalog and choose models. Review the API call count, estimated cost, and saved-input preview before Generate. Generation uses saved inputs, excluding unsaved input edits and manual responses. A saved task and valid output format are required; Custom also requires saved format instructions. Sources are optional for generation but remain required for source-only Fact check.
 
 If Python is not found, install Python 3.12 and rerun the commands. If a model operation is disabled, check the saved inputs, model selection, and API key. Restart Streamlit after changing environment configuration. If port 8501 is occupied, use `streamlit run app/ui.py --server.port 8502`.
 
@@ -86,15 +88,33 @@ Do not put secrets in sources or prompts you do not intend to send. Local databa
 
 Use Streamlit's appearance menu to select System, Light, or Dark. System is the default in a fresh browser; explicit browser preferences are retained.
 
+Opening the bare app URL shows Home. Project URLs use `#project-<ID>` (for example, `http://127.0.0.1:8501/#project-3`); opening or refreshing a valid URL restores that project. Selecting a project updates the hash, and Home clears it. Invalid, deleted, or legacy name-based hashes fall back to Home and are cleared. IDs refer to projects in the local database; links are not portable between unrelated databases. Renaming a project does not change its ID-based URL.
+
+Navigation uses a browser component and may briefly show “Opening workspace…” during initialization. Project switches replace the hash without adding browser-history entries. Unsaved drafts and model selections remain session state: Home/project switching preserves working drafts within the session, but refresh does not. Save a version before refreshing. The former deprecated `components.html()` hash-sync iframe has been replaced by the v2 navigation component.
+
 ## Compare and finish
+
+Use **☆ Favorites** beside Models to star or unstar a model without selecting it or making a request. Favorites appear first; all other eligible models remain available in catalog order. Unavailable favorite IDs are retained and can be unstarred in the popover. Existing pricing filters still apply.
+
+Favorites are shared across projects using the same database and persist in `<database filename>.favorites.json` beside it (for example, `data/workspace.db.favorites.json`). Copy this sidecar with the database to back up or transfer favorites. Separate database paths have separate favorites. Malformed or unreadable preferences show an error and are not overwritten. Avoid simultaneous favorite edits in multiple tabs; competing writes can overwrite one another.
 
 Compare keeps failed and interrupted requests visible alongside successful responses. Ratings never reorder outputs or select a Primary response.
 
+When available, **Provider-reported sources** displays citation links separately from project sources, in Compare and through the originating response in Final. Individual citation-marker mappings are not assumed, and these links do not automatically support edited or merged content.
+
+Compare warns “Output limit reached — this response may be incomplete.” when the saved provider finish reason is `length`. Original response text remains unchanged.
+
 Select a Primary response explicitly, edit its Working copy, and save a version. Original responses remain unchanged. **Finish / Save** saves the Current version locally; it does not publish anything. Repeating a save on unchanged current text does not duplicate the version.
 
-Version history lets you explicitly change the Current version. Primary response and Current version are distinct choices. Returning Home or switching projects preserves unsaved working edits within the session; a full restart requires saved versions.
+Primary response selects the response to edit; Current version identifies the saved version currently selected in history. Selecting a Primary response alone does not change the Current version. Explicitly restoring a saved version also aligns Primary with that version's originating response and starts the editor from the restored text. Returning Home or switching projects preserves unsaved working edits within the session; a fresh session requires saved versions.
 
 Manual external-model responses are stored with unverified provenance. Their external API usage and cost are not tracked by this application.
+
+### Copying responses and drafts
+
+Compare has a copy icon beside each successful model response; it copies only the full original response text. **Select to copy** chooses responses for **Copy selected**; **Copy all** copies every successful response in the displayed run. Bulk copies include model labels and exclude failed responses. The optional **Include original task and sources** adds that run's saved task, output format, source titles, available URLs, and source text from its historical snapshot. It defaults to off and does not affect individual copy icons. Copy selections are separate from ratings and Optional Compute.
+
+Final's **Copy** reads the current working-copy editor, including unsaved typing. Copy buttons run locally in the browser without model requests or version saves. “Copied” appears only after the browser confirms success; denied clipboard access shows a manual-copy instruction. Use localhost or HTTPS and allow clipboard access when requested. Selecting copy options causes an ordinary UI rerun; clipboard buttons do not request one.
 
 ## Optional Compute — only when needed
 
@@ -143,6 +163,14 @@ git diff --check
 
 Tests use temporary SQLite databases and mocked API responses. Outbound network access is blocked during tests; no real API key or paid requests are required.
 
+The clipboard JavaScript lifecycle harness runs **separately from pytest**. It requires a modern Node.js runtime supporting `Array.prototype.at()` and the activated Python environment above; no npm packages are needed. From the repository root, pipe the actual component source into the harness:
+
+```sh
+python -c 'from app.clipboard_ui import COPY_JS; print(COPY_JS)' | node tests/clipboard_lifecycle.js
+```
+
+The harness uses DOM and clipboard doubles to check repeated rendering, cleanup, current payloads, and success/failure feedback. It does not verify real browser permissions; manually test clipboard actions, including unsaved Final edits, in your browser. Node.js is only needed for this harness, not to run the application.
+
 ## Repository structure
 
 - `app/ui.py`, `app/*_ui.py`, `app/ui_style.py`: Streamlit interface and shared presentation.
@@ -151,3 +179,9 @@ Tests use temporary SQLite databases and mocked API responses. Outbound network 
 - `app/db.py`, `app/schema.sql`: local SQLite persistence.
 - `tests/`: automated coverage.
 - `.streamlit/config.toml`, `.env.example`: appearance/local-server defaults and configuration template.
+
+### Webpage extraction limits
+
+New webpage fetches prefer a substantive article (at least 200 characters of non-link text), then main content, then a cleaned body fallback. Clearly marked navigation, related posts, sharing controls, comments, and hidden elements are excluded. Headings, list items, code indentation, table-cell separators, captions, and HTTP(S) article links are retained. Relative links use the final fetched URL; link targets are not fetched. Repeated prose is not deduplicated.
+
+Extraction is structural, not a browser rendering or a universal readability engine. Unmarked boilerplate, unusual markup, multiple substantial articles, and JavaScript-only pages may need manual review or pasted source text. CSS stylesheets are not evaluated. Previously saved sources and historical run snapshots are never rewritten by an extractor update.

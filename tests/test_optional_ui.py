@@ -1,3 +1,4 @@
+from navigation_support import browser_app
 import json
 from pathlib import Path
 
@@ -38,7 +39,7 @@ def optional_ui_environment(app_environment, monkeypatch):
     monkeypatch.setattr('app.openrouter.OpenRouter.catalog', forbidden)
     monkeypatch.setattr('app.generation_ui.generate', forbidden)
     catalog = parse_catalog({'data': [model_entry('author/free', '0', '0'), model_entry('author/unknown', None, None)]})
-    app = AppTest.from_file(str(UI_PATH))
+    app = browser_app(str(UI_PATH), project.id)
     app.session_state['loaded_catalog'] = catalog
     app.run()
     return project, source, responses, version, app
@@ -81,7 +82,11 @@ def test_explicit_operation_estimate_reruns_and_history(app_environment, optiona
     app.run()
     assert calls == []
     assert list_optional_runs(app_environment, project.id) == []
+    widget(app.number_input, 'Optional maximum output tokens').set_value(2048).run()
+    widget(app.slider, 'Optional temperature').set_value(0.4).run()
     widget(app.button, f'Run {label}').click().run()
+    assert calls[0]['max_tokens'] == 2048
+    assert calls[0]['temperature'] == 0.4
     assert not app.exception
     assert len(calls) == 1
     payload = json.loads(calls[0]['messages'][1]['content'])
@@ -98,7 +103,7 @@ def test_explicit_operation_estimate_reruns_and_history(app_environment, optiona
     widget(app.text_area, 'Optional instructions').set_value('Another instruction').run()
     assert len(calls) == 1
     assert len(list_optional_runs(app_environment, project.id)) == 1
-    reopened = AppTest.from_file(str(UI_PATH)).run()
+    reopened = browser_app(str(UI_PATH), project.id).run()
     assert not reopened.exception
     assert widget(reopened.selectbox, 'Optional compute history')
     assert len(calls) == 1
@@ -135,7 +140,7 @@ def test_candidate_adoption_is_explicit_and_local(app_environment, optional_ui_e
     widget(app.selectbox, 'Optional operation').select('critique').run()
     assert next(e for e in app.expander if e.label == '05  FINAL').proto.expanded
     assert app.session_state[f'section_reveal_{project.id}_final'] == 2
-    reopened = AppTest.from_file(str(UI_PATH)).run()
+    reopened = browser_app(str(UI_PATH), project.id).run()
     assert not next(e for e in reopened.expander if e.label == '05  FINAL').proto.expanded
 
 
@@ -267,3 +272,41 @@ def test_optional_reported_models_show_base_estimate_without_dispatch(
         assert not widget(app.button, 'Run Rewrite').disabled
         assert not app.exception
     assert list_optional_runs(app_environment, project.id) == []
+
+
+def test_parameter_defaults_navigation_and_isolation(app_environment, optional_ui_environment):
+    project, _, _, _, app = optional_ui_environment
+    other = create_project(app_environment, 'Other parameters')
+    seed_run(app_environment, other.id, 1)
+
+    def parameters(expected):
+        assert not app.exception
+        actual = (
+            widget(app.number_input, 'Maximum output tokens per model').value,
+            widget(app.slider, 'Temperature').value,
+            widget(app.number_input, 'Optional maximum output tokens').value,
+            widget(app.slider, 'Optional temperature').value,
+        )
+        assert actual == expected
+
+    parameters((1024, 0.7, 1024, 0.7))
+    widget(app.number_input, 'Maximum output tokens per model').set_value(2048).run()
+    widget(app.slider, 'Temperature').set_value(0.3).run()
+    widget(app.number_input, 'Optional maximum output tokens').set_value(3072).run()
+    widget(app.slider, 'Optional temperature').set_value(0.4).run()
+    app.run()
+    parameters((2048, 0.3, 3072, 0.4))
+    widget(app.selectbox, 'Optional operation').select('fact_check').run()
+    parameters((2048, 0.3, 4096, 0.4))
+    widget(app.number_input, 'Optional maximum output tokens').set_value(8192).run()
+    widget(app.selectbox, 'Optional operation').select('rewrite').run()
+    parameters((2048, 0.3, 3072, 0.4))
+    widget(app.selectbox, 'Optional operation').select('fact_check').run()
+    parameters((2048, 0.3, 8192, 0.4))
+    widget(app.sidebar.button, 'Multi-LLM\nWorkspace').click().run()
+    widget(app.sidebar.selectbox, 'Open project').select(project.id).run()
+    parameters((2048, 0.3, 8192, 0.4))
+    widget(app.sidebar.selectbox, 'Open project').select(other.id).run()
+    parameters((1024, 0.7, 1024, 0.7))
+    widget(app.sidebar.selectbox, 'Open project').select(project.id).run()
+    parameters((2048, 0.3, 8192, 0.4))

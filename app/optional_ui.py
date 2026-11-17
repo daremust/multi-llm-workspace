@@ -86,10 +86,14 @@ def render_controls(database_path: Path, project_id: int, api_key: SecretStr | N
         model_id = st.selectbox('Optional operation model', list(models), index=None,
                                 format_func=lambda value: model_label(models[value]), key=key)
         with st.expander('Optional generation parameters'):
+            if f'optional_max_tokens_{project_id}_{operation}' not in st.session_state:
+                st.session_state[f'optional_max_tokens_{project_id}_{operation}'] = default_output_tokens(operation)
+            if f'optional_temperature_{project_id}' not in st.session_state:
+                st.session_state[f'optional_temperature_{project_id}'] = 0.7
             max_tokens = st.number_input('Optional maximum output tokens', min_value=1, max_value=32768,
-                                         value=default_output_tokens(operation), step=128,
+                                         step=128,
                                          key=f'optional_max_tokens_{project_id}_{operation}')
-            temperature = st.slider('Optional temperature', 0.0, 2.0, 0.7, 0.1, key=f'optional_temperature_{project_id}')
+            temperature = st.slider('Optional temperature', 0.0, 2.0, step=0.1, key=f'optional_temperature_{project_id}')
         if model_id is not None:
             try:
                 plan = prepare_optional_operation(database_path, project_id, catalog, model_id, operation,

@@ -84,8 +84,22 @@ def _set_current(connection, project_id: int, version_id: int) -> None:
 
 
 def set_current_version(database_path: Path, project_id: int, version_id: int) -> None:
+    """Explicit restoration aligns the editor's primary response and saved base."""
     with connect(database_path) as connection:
         connection.execute('BEGIN IMMEDIATE')
+        version = connection.execute(
+            'SELECT derived_from_response_id FROM versions WHERE project_id = ? AND id = ?',
+            (project_id, version_id),
+        ).fetchone()
+        if version is None:
+            raise ValueError('Choose a version belonging to this project.')
+        response_id = version['derived_from_response_id']
+        _response(connection, project_id, response_id)
+        if _primary_id(connection, project_id) != response_id:
+            connection.execute(
+                "INSERT INTO project_events (project_id, event_type, response_id, payload_json, created_at) VALUES (?, 'selection_changed', ?, '{}', ?)",
+                (project_id, response_id, datetime.now(UTC).isoformat()),
+            )
         _set_current(connection, project_id, version_id)
 
 

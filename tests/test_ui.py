@@ -1,3 +1,4 @@
+from navigation_support import browser_app
 from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
@@ -8,7 +9,7 @@ UI_PATH = Path(__file__).resolve().parents[1] / "app" / "ui.py"
 
 
 def test_create_and_reopen_projects_without_api_key(app_environment):
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH)).run()
     assert not app.exception
     assert not any("No model calls happen automatically" in caption.value for caption in app.caption)
     assert any("**Tip:** Start with your source" in item.value for item in app.markdown)
@@ -26,7 +27,7 @@ def test_create_and_reopen_projects_without_api_key(app_environment):
     assert not app.exception
     assert app.subheader[0].value == "Second project"
 
-    reopened = AppTest.from_file(str(UI_PATH)).run()
+    reopened = browser_app(str(UI_PATH)).run()
     assert not reopened.exception
     first = next(project for project in list_projects(app_environment) if project.name == "First project")
     reopened.sidebar.selectbox[0].select(first.id).run()
@@ -35,7 +36,7 @@ def test_create_and_reopen_projects_without_api_key(app_environment):
 
 
 def test_blank_project_name_is_rejected(app_environment):
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH)).run()
     widget(app.sidebar.button, '+ Create project').click().run()
     app.sidebar.text_input[0].set_value("   ")
     widget(app.sidebar.button, 'Create').click().run()
@@ -61,7 +62,7 @@ def widget(elements, label):
 def test_full_input_workspace_reopens_and_isolates_projects(app_environment):
     from app.db import get_project, list_manual_responses, list_sources
 
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH)).run()
     widget(app.sidebar.button, '+ Create project').click().run()
     app.sidebar.text_input[0].set_value('Workspace')
     widget(app.sidebar.button, 'Create').click().run()
@@ -81,7 +82,7 @@ def test_full_input_workspace_reopens_and_isolates_projects(app_environment):
     assert not app.exception
     assert list_manual_responses(app_environment, project.id)[0].run_request_id is None
 
-    reopened = AppTest.from_file(str(UI_PATH)).run()
+    reopened = browser_app(str(UI_PATH), project.id).run()
     assert not reopened.exception
     assert widget(reopened.text_area, 'Task / instructions').value == 'Summarize the sources'
     assert widget(reopened.selectbox, 'Output format').value == 'Custom'
@@ -111,7 +112,7 @@ def test_ui_validation_and_fetch_error(app_environment, monkeypatch):
     from app.webpage import WebpageError
     from app.db import list_sources
 
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH)).run()
     widget(app.sidebar.button, '+ Create project').click().run()
     app.sidebar.text_input[0].set_value('Validation')
     widget(app.sidebar.button, 'Create').click().run()
@@ -135,7 +136,7 @@ def test_ui_validation_and_fetch_error(app_environment, monkeypatch):
 def test_progressive_disclosure_preserves_saved_and_unsaved_inputs(app_environment):
     from app.db import get_project
 
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH)).run()
     assert not next(e for e in app.expander if e.label == 'How this workspace works').proto.expanded
     widget(app.sidebar.button, '+ Create project').click().run()
     app.sidebar.text_input[0].set_value('Disclosure')
@@ -166,8 +167,78 @@ def test_progressive_disclosure_preserves_saved_and_unsaved_inputs(app_environme
     assert not any('Unsaved task / format edits' in c.value for c in app.caption)
 
 
+def test_task_drafts_initialize_without_duplicate_state_warnings(app_environment, monkeypatch):
+    from unittest.mock import Mock
+    from streamlit.elements.lib import policies
+    from app.db import create_project, get_project, initialize_database, save_project_inputs
+
+    initialize_database(app_environment)
+    first = create_project(app_environment, 'First draft')
+    second = create_project(app_environment, 'Second draft')
+    for project in (first, second):
+        save_project_inputs(app_environment, project.id, f'Task {project.id}',
+                            'Custom', f'Format {project.id}')
+
+    original_check = policies.check_session_state_rules
+    monkeypatch.setattr(policies, '_shown_default_value_warning', False)
+    checked = set()
+
+    def check_without_suppression(default_value, key, writes_allowed=True):
+        # Reset before each affected widget: another widget/test cannot mask a warning.
+        if key in {f'project_{p.id}_{field}' for p in (first, second)
+                   for field in ('task', 'custom', 'format')}:
+            policies._shown_default_value_warning = False
+            checked.add(key)
+            assert not policies.config.get_option('global.disableWidgetStateDuplicationWarning')
+        return original_check(default_value, key, writes_allowed)
+
+    monkeypatch.setattr(policies, 'check_session_state_rules', check_without_suppression)
+    warning = Mock(wraps=policies._LOGGER.warning)
+    monkeypatch.setattr(policies._LOGGER, 'warning', warning)
+
+    def values(app, task, custom, output='Custom'):
+        assert not app.exception
+        assert widget(app.text_area, 'Task / instructions').value == task
+        assert widget(app.selectbox, 'Output format').value == output
+        if output == 'Custom':
+            assert widget(app.text_area, 'Custom format / instructions').value == custom
+        assert not any('created with a default value' in w.value
+                       and any(f'"{key}"' in w.value for key in checked) for w in app.warning)
+
+    app = browser_app(str(UI_PATH), first.id).run()
+    values(app, f'Task {first.id}', f'Format {first.id}')
+    app.run()
+    widget(app.text_area, 'Task / instructions').set_value('Unsaved task').run()
+    widget(app.text_area, 'Custom format / instructions').set_value('Unsaved format').run()
+    app.run()
+    values(app, 'Unsaved task', 'Unsaved format')
+    widget(app.selectbox, 'Output format').select('Plain answer').run()
+    app.run()
+    values(app, 'Unsaved task', 'Unsaved format', 'Plain answer')
+    widget(app.sidebar.button, 'Multi-LLM\nWorkspace').click().run()
+    widget(app.sidebar.selectbox, 'Open project').select(first.id).run()
+    values(app, 'Unsaved task', 'Unsaved format', 'Plain answer')
+    widget(app.sidebar.selectbox, 'Open project').select(second.id).run()
+    values(app, f'Task {second.id}', f'Format {second.id}')
+    widget(app.sidebar.selectbox, 'Open project').select(first.id).run()
+    values(app, 'Unsaved task', 'Unsaved format', 'Plain answer')
+    widget(app.selectbox, 'Output format').select('Custom').run()
+    values(app, 'Unsaved task', 'Unsaved format')
+    widget(app.selectbox, 'Output format').select('Plain answer').run()
+    fresh = browser_app(str(UI_PATH), first.id).run()
+    values(fresh, f'Task {first.id}', f'Format {first.id}')
+    for project in (first, second):
+        saved = get_project(app_environment, project.id)
+        assert saved.task == f'Task {project.id}'
+        assert saved.custom_output_format == f'Format {project.id}'
+        assert saved.output_format == 'Custom'
+    assert len(checked) == 6
+    assert not any('created with a default value' in str(call)
+                   and any(key in str(call) for key in checked) for call in warning.call_args_list)
+
+
 def test_workspace_visual_identity_and_native_symbols(app_environment):
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH)).run()
     assert app.title[0].value == 'Multi-LLM Workspace'
     assert any('Compare multiple models. Use more compute only when it’s useful.' in m.value for m in app.markdown)
     sidebar = [m.value for m in app.sidebar.markdown]
@@ -188,7 +259,7 @@ def test_workspace_visual_identity_and_native_symbols(app_environment):
 
 
 def test_create_disclosure_cancel_and_submit_validation(app_environment):
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH)).run()
     assert not app.sidebar.text_input
     assert not app.error
     widget(app.sidebar.button, '+ Create project').click().run()
@@ -208,7 +279,7 @@ def test_create_disclosure_cancel_and_submit_validation(app_environment):
 
 
 def test_home_workflow_and_project_tip_help_order(app_environment):
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH)).run()
     assert any('class="workflow workflow--hero"' in m.value for m in app.main.markdown)
     brand = widget(app.sidebar.button, 'Multi-LLM\nWorkspace')
     assert not brand.proto.help
@@ -231,28 +302,20 @@ def test_home_workflow_and_project_tip_help_order(app_environment):
 
 
 def test_project_hash_sync_tracks_visible_selection_without_data_changes(app_environment):
+    import json
     from app.db import create_project, initialize_database, get_project
-
     initialize_database(app_environment)
     project = create_project(app_environment, 'Test Project')
     before = get_project(app_environment, project.id)
-    app = AppTest.from_file(str(UI_PATH)).run()
-
-    def script():
-        return next(e.proto.srcdoc for e in app.get('iframe')
-                    if 'const home =' in e.proto.srcdoc)
-
-    assert 'const home = false;' in script()
-    assert "heading.id" in script()  # Native slug, not a second slug implementation.
-    assert 'history.replaceState' in script()
+    app = browser_app(str(UI_PATH), project.id).run()
+    def fragment():
+        return next(json.loads(e.proto.json)['hash'] for e in app.get('bidi_component')
+                    if e.proto.component_name == 'workspace_navigation')
+    assert fragment() == f'#project-{project.id}'
     widget(app.sidebar.button, 'Multi-LLM\nWorkspace').click().run()
+    assert fragment() == ''
     assert app.session_state['project_id'] is None
-    assert app.session_state['project_selector'] is None
-    assert 'const home = true;' in script()
-    assert "url.hash = home ? '' : heading.id" in script()
-    assert get_project(app_environment, project.id) == before
     widget(app.sidebar.selectbox, 'Open project').select(project.id).run()
-    assert 'const home = false;' in script()
-    assert app.subheader[0].value == 'Test Project'
+    assert fragment() == f'#project-{project.id}'
     assert get_project(app_environment, project.id) == before
     assert not app.exception

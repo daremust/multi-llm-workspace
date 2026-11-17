@@ -16,3 +16,9 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install -e ".[dev]"
       - run: python -m pytest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+      - name: Clipboard JavaScript harness
+        shell: bash
+        run: python -c 'from app.clipboard_ui import COPY_JS; print(COPY_JS)' | node tests/clipboard_lifecycle.js

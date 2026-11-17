@@ -37,8 +37,6 @@ class Estimate:
 
 
 def build_messages(snapshot: dict) -> list[dict[str, str]]:
-    if not snapshot['sources']:
-        raise ValueError('Save at least one source before generating.')
     if not snapshot['task'].strip():
         raise ValueError('Save task / instructions before generating.')
     if snapshot['output_format'] == 'Custom' and not snapshot['custom_output_format'].strip():
@@ -46,7 +44,12 @@ def build_messages(snapshot: dict) -> list[dict[str, str]]:
     effective = {key: snapshot[key] for key in (
         'sources', 'task', 'additional_instructions', 'output_format', 'custom_output_format',
     )}
-    return [{'role': 'system', 'content': SYSTEM_PROMPT},
+    system_prompt = SYSTEM_PROMPT if snapshot['sources'] else (
+        'Complete the user task. No source material was provided. '
+        'Distinguish facts from assumptions and identify missing information. '
+        'Follow the requested output format.'
+    )
+    return [{'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': json.dumps(effective, ensure_ascii=False)}]
 
 

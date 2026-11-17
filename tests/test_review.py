@@ -100,3 +100,77 @@ def test_project_scope_and_explicit_selection(database_path):
     rate_response(database_path, first.id, response.id, 3)
     rate_response(database_path, first.id, response.id, None)
     assert get_primary_response(database_path, first.id).human_rating is None
+
+
+def test_restore_cross_response_and_repair_current_provenance(database_path):
+    project = create_project(database_path, 'Restore')
+    run = seed_run(database_path, project.id, 2)
+    first, second = [r.response for r in list_run_requests(database_path, run)]
+    select_primary_response(database_path, project.id, first.id)
+    old = save_review_version(database_path, project.id, first.id, 'Saved first')
+    select_primary_response(database_path, project.id, second.id)
+    newer = save_review_version(database_path, project.id, second.id, 'Saved second')
+    set_current_version(database_path, project.id, old)
+    assert get_primary_response(database_path, project.id).id == first.id
+    assert get_project(database_path, project.id).current_version_id == old
+    before = counts(database_path)
+    assert save_review_version(database_path, project.id, first.id, 'Saved first', old) == old
+    assert counts(database_path) == before
+    edited = save_review_version(database_path, project.id, first.id, 'Edited first', old)
+    version = list_versions(database_path, project.id)[0]
+    assert (version.id, version.derived_from_response_id, version.derived_from_version_id) == (edited, first.id, old)
+    assert {v.id: v.text for v in list_versions(database_path, project.id)}[newer] == 'Saved second'
+    select_primary_response(database_path, project.id, second.id)
+    set_current_version(database_path, project.id, edited)
+    assert get_primary_response(database_path, project.id).id == first.id
+    before = counts(database_path)
+    set_current_version(database_path, project.id, edited)
+    assert counts(database_path) == before
+
+
+@pytest.mark.parametrize('invalid', ['missing', 'other_project', 'no_origin', 'failed_origin'])
+def test_restore_invalid_target_has_no_side_effects(database_path, invalid):
+    project = create_project(database_path, 'Restore validation')
+    other = create_project(database_path, 'Other')
+    run = seed_run(database_path, project.id, 2)
+    first, second = [r.response for r in list_run_requests(database_path, run)]
+    select_primary_response(database_path, project.id, first.id)
+    target = save_review_version(database_path, project.id, first.id, 'First')
+    select_primary_response(database_path, project.id, second.id)
+    save_review_version(database_path, project.id, second.id, 'Second')
+    if invalid == 'no_origin':
+        with connect(database_path) as connection:
+            connection.execute('UPDATE versions SET derived_from_response_id = NULL WHERE id = ?', (target,))
+    if invalid == 'failed_origin':
+        with connect(database_path) as connection:
+            connection.execute("UPDATE run_requests SET status = 'failed' WHERE id = ?", (first.run_request_id,))
+    before = counts(database_path)
+    state = get_project(database_path, project.id)
+    with pytest.raises(ValueError):
+        set_current_version(database_path, other.id if invalid == 'other_project' else project.id,
+                            999999 if invalid == 'missing' else target)
+    assert counts(database_path) == before
+    assert get_project(database_path, project.id) == state
+    assert get_primary_response(database_path, project.id).id == second.id
+    assert get_project(database_path, other.id).current_version_id is None
+    assert get_primary_response(database_path, other.id) is None
+
+
+def test_restore_rolls_back_primary_if_current_update_fails(database_path, monkeypatch):
+    project = create_project(database_path, 'Atomic restore')
+    run = seed_run(database_path, project.id, 2)
+    first, second = [r.response for r in list_run_requests(database_path, run)]
+    select_primary_response(database_path, project.id, first.id)
+    target = save_review_version(database_path, project.id, first.id, 'First')
+    select_primary_response(database_path, project.id, second.id)
+    save_review_version(database_path, project.id, second.id, 'Second')
+    before = counts(database_path)
+    state = get_project(database_path, project.id)
+    def fail(connection, project_id, version_id):
+        raise RuntimeError('Simulated update failure')
+    monkeypatch.setattr('app.review._set_current', fail)
+    with pytest.raises(RuntimeError, match='Simulated'):
+        set_current_version(database_path, project.id, target)
+    assert counts(database_path) == before
+    assert get_project(database_path, project.id) == state
+    assert get_primary_response(database_path, project.id).id == second.id

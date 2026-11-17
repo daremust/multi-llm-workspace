@@ -2,20 +2,62 @@
 
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import streamlit as st
 
-from app.db import get_project
+from app.db import get_project, get_run
 from app.review import (
     get_primary_response, list_versions, rate_response, save_review_version,
     select_primary_response, set_current_version,
 )
+from app.clipboard_ui import bulk_payload, copy_action, copy_controls, selection_key
 from app.types import RunRequest
 from app.ui_style import status_label
 
 
 def _cost(value: float | None) -> str:
     return 'unknown' if value is None else f'${value:g}'
+
+
+def provider_sources(metadata: dict) -> list[tuple[str, str]]:
+    """Display only usable URL citations; retain raw annotations in stored metadata."""
+    annotations = metadata.get('annotations')
+    if not isinstance(annotations, list):
+        return []
+    sources = {}
+    for annotation in annotations:
+        if not isinstance(annotation, dict) or annotation.get('type') != 'url_citation':
+            continue
+        citation = annotation.get('url_citation')
+        if not isinstance(citation, dict):
+            continue
+        url = citation.get('url')
+        if not isinstance(url, str) or any(char.isspace() or ord(char) < 32 for char in url):
+            continue
+        try:
+            parsed = urlsplit(url)
+            if (parsed.scheme not in {'http', 'https'} or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None):
+                continue
+            parsed.port  # Reject malformed ports as well as malformed hosts.
+        except ValueError:
+            continue
+        title = citation.get('title')
+        label = title.strip() if isinstance(title, str) and title.strip() else url
+        sources.setdefault(url, label)
+    return [(label, url) for url, label in sources.items()]
+
+
+def render_provider_sources(response) -> None:
+    sources = provider_sources(json.loads(response.generation_metadata_json))
+    if sources:
+        with st.expander('Provider-reported sources'):
+            st.caption(f'Reported for original response #{response.id}; not independently verified. '
+                       'These are separate from project sources and do not automatically support '
+                       'edits, rewrites, or merged content. Citation numbers are not project source IDs.')
+            for title, url in sources:
+                st.link_button(title, url)
 
 
 def render_comparison(database_path: Path, project_id: int, requests: list[RunRequest]) -> None:
@@ -27,16 +69,34 @@ def render_comparison(database_path: Path, project_id: int, requests: list[RunRe
     with st.container(key='review_comparison'):
         for column, request in zip(st.columns(len(requests)), requests):
             with column:
-                render_response(database_path, project_id, request, primary.id if primary else None)
+                render_response(database_path, project_id, request, primary.id if primary else None,
+                                allow_copy=True)
+                if request.status == 'succeeded' and request.response:
+                    st.checkbox('Select to copy', key=selection_key(project_id, request.run_id, request.id))
+    run_id = requests[0].run_id
+    successful = [r for r in requests if r.status == 'succeeded' and r.response]
+    selected = [r for r in successful if st.session_state.get(selection_key(project_id, run_id, r.id), False)]
+    include_context = st.checkbox('Include original task and sources', key=f'copy_context_{project_id}_{run_id}')
+    run = get_run(database_path, run_id)
+    snapshot = json.loads(run.input_snapshot_json) if include_context else None
+    copy_controls(f'copy_bulk_{project_id}_{run_id}', [
+        copy_action(f'Copy selected ({len(selected)})', bulk_payload(selected, snapshot), disabled=not selected),
+        copy_action(f'Copy all ({len(successful)})', bulk_payload(successful, snapshot), disabled=not successful),
+    ])
 
 
 def render_response(database_path: Path, project_id: int, request: RunRequest, primary_id: int | None, *,
-                    show_body: bool = True, allow_review: bool = True) -> None:
+                    show_body: bool = True, allow_review: bool = True, allow_copy: bool = False) -> None:
     response = request.response
     metadata = json.loads(response.generation_metadata_json) if response else {}
     name = metadata.get('catalog_name') or request.requested_model.split('/', 1)[-1]
     status = status_label(request.status)
-    st.write(f'{name} · {"✓" if request.status == "succeeded" else status}')
+    heading = f'{name} · {"✓" if request.status == "succeeded" else status}'
+    if allow_copy and response and request.status == 'succeeded':
+        copy_controls(f'copy_response_{project_id}_{request.run_id}_{request.id}',
+                      [copy_action('Copy response', response.text, icon=True)], heading=heading)
+    else:
+        st.write(heading)
     if response and response.id == primary_id:
         st.caption('Primary response · selected by you')
     latency = f'{request.latency_ms / 1000:.1f}s' if request.latency_ms is not None else 'latency unknown'
@@ -70,6 +130,9 @@ def render_response(database_path: Path, project_id: int, request: RunRequest, p
         st.caption('Null metadata means unknown / not reported. Catalog namespace is a label, not verified upstream provenance.')
     if response and show_body:
         st.text(response.text)
+        if response.finish_reason == 'length':
+            st.warning('Output limit reached — this response may be incomplete.')
+        render_provider_sources(response)
     if allow_review and response and request.status == 'succeeded':
         options = [None, 1, 2, 3, 4, 5]
         rating = st.selectbox('Human rating', options, index=options.index(response.human_rating),
@@ -102,13 +165,19 @@ def render_editor(database_path: Path, project_id: int) -> None:
     else:
         base = current if current and current.derived_from_response_id == primary.id else None
         st.caption(f'Primary response #{primary.id} · Starting from ' + (f'version #{base.id}.' if base else 'the original response.'))
+        render_provider_sources(primary)
         draft_key = draft_state_key(project_id, primary.id, base.id if base else None)
         widget_key = f'editor_{draft_key}'
         # Separate non-widget state survives Streamlit removing widgets on project/run switches.
         if draft_key not in st.session_state:
             st.session_state[draft_key] = base.text if base else primary.text
-        edited = st.text_area('Working copy', value=st.session_state[draft_key], height=300,
-                              key=widget_key, on_change=_keep_draft, args=(widget_key, draft_key))
+        if widget_key not in st.session_state:
+            st.session_state[widget_key] = st.session_state[draft_key]
+        editor_scope = f'copy_editor_{project_id}_{primary.id}_{base.id if base else 0}'
+        with st.container(key=editor_scope):
+            edited = st.text_area('Working copy', height=300,
+                                  key=widget_key, on_change=_keep_draft, args=(widget_key, draft_key))
+            copy_controls(f'copy_final_{editor_scope}', [copy_action('Copy', edited)], editor=editor_scope)
         state = 'Unsaved Working copy edits. ' if edited != (base.text if base else primary.text) else ''
         st.caption(state + 'Original responses stay unchanged. Unsaved edits stay in this browser session; save a version to preserve them across restarts.')
         save = st.button('Save version', key=f'save_version_{project_id}')
@@ -139,7 +208,8 @@ def render_editor(database_path: Path, project_id: int) -> None:
         with st.expander('Inspect saved version'):
             st.caption(f'Operation: {version.operation} · Source response: {version.derived_from_response_id} · Base version: {version.derived_from_version_id}')
             st.text(version.text)
-        if st.button('Set version as current', key=f'current_version_{project_id}', disabled=version.id == project.current_version_id):
+        if st.button('Set version as current', key=f'current_version_{project_id}', disabled=(version.id == project.current_version_id
+                           and primary is not None and primary.id == version.derived_from_response_id)):
             set_current_version(database_path, project_id, version.id)
             # Explicit version changes replace that version's cached draft and widget value.
             # Ordinary reruns still preserve unsaved edits through _keep_draft.

@@ -10,6 +10,17 @@ The current release candidate provides:
 - Optional Rewrite, Merge, Critique, and source-grounded Fact check.
 - Local SQLite history.
 
+## Post-v0.1.0 candidates
+
+These deferred improvements are candidates for discussion, not release commitments:
+
+- Copy clean with a preview and explicit user selection of removals.
+- Optional autosave.
+- Explicit user-initiated continuation for output-limited responses.
+- Source titles and URLs alongside Fact check evidence.
+- Investigate intermittent blank screens if the issue recurs.
+- Automated browser navigation coverage and ongoing minimum Streamlit version testing.
+
 ## Potential future directions
 
 These are possibilities for discussion, not commitments or scheduled releases.

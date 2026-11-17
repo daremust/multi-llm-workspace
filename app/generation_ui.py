@@ -7,6 +7,7 @@ import streamlit as st
 from pydantic import SecretStr
 
 from app.ui_style import status_label
+from app.model_favorites import FavoritesError, favorites_first, load_favorites, set_favorite
 
 from app.db import list_generation_runs, list_run_requests
 from app.generation import generate, prepare_generation
@@ -27,7 +28,7 @@ def model_label(model: CatalogModel) -> str:
 
 
 def render_generation(database_path: Path, project_id: int, api_key: SecretStr | None) -> None:
-    st.caption('Select the models yourself. Generate sends saved sources, task, and output format to OpenRouter. Unsaved edits are excluded.')
+    st.caption('Select the models yourself. Sources are optional. Generate sends the saved task, output format, and any saved sources to OpenRouter. Unsaved edits are excluded.')
     if api_key is None:
         st.caption('OPENROUTER_API_KEY is not configured. Add it to your environment or .env to generate; local inputs and saved results remain available.')
     if st.button('Load / refresh model catalog', key=f'catalog_refresh_{project_id}'):
@@ -56,13 +57,49 @@ def render_selector(database_path: Path, project_id: int, api_key: SecretStr | N
     if any(model_id not in available for model_id in previous):
         st.session_state[selection_key] = [model_id for model_id in previous if model_id in available]
         st.caption('Models outside the current catalog/filter were removed from selection. No replacements were selected.')
-    selected = st.multiselect('Models', list(available), format_func=lambda model_id: model_label(available[model_id]),
-                              key=selection_key, placeholder='Choose one or more models')
+    favorites = set()
+    preferences_error = None
+    try:
+        favorites = load_favorites(database_path)
+    except FavoritesError as exc:
+        preferences_error = str(exc)
+    selector, management = st.columns([5, 1])
+    with selector:
+        selected = st.multiselect('Models', favorites_first(available, favorites),
+                                  format_func=lambda model_id: model_label(available[model_id]),
+                                  key=selection_key, placeholder='Choose one or more models')
+    with management.popover('☆ Favorites'):
+        st.caption('Favorites appear first. Starring does not select models or make requests.')
+        if preferences_error:
+            st.error(preferences_error)
+        else:
+            catalog_models = {model.id: model for model in catalog.models}
+            choices = list(catalog_models) + sorted(favorites - catalog_models.keys())
+            key = f'favorite_model_{project_id}'
+            if st.session_state.get(key) not in choices:
+                st.session_state[key] = None
+            favorite_id = st.selectbox('Model to star / unstar', choices, index=None, key=key,
+                                      format_func=lambda mid: (
+                                          model_label(catalog_models[mid]) if mid in catalog_models
+                                          else f'{mid} · unavailable in current catalog'))
+            starred = favorite_id in favorites
+            if st.button('Unstar' if starred else 'Star', disabled=favorite_id is None,
+                         key=f'favorite_toggle_{project_id}'):
+                try:
+                    set_favorite(database_path, favorite_id, not starred)
+                except FavoritesError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
     with st.expander('Model details and generation parameters'):
         left, right = st.columns(2)
+        if f'max_tokens_{project_id}' not in st.session_state:
+            st.session_state[f'max_tokens_{project_id}'] = 1024
+        if f'temperature_{project_id}' not in st.session_state:
+            st.session_state[f'temperature_{project_id}'] = 0.7
         max_tokens = left.number_input('Maximum output tokens per model', min_value=1, max_value=32768,
-                                       value=1024, step=128, key=f'max_tokens_{project_id}')
-        temperature = right.slider('Temperature', min_value=0.0, max_value=2.0, value=0.7,
+                                       step=128, key=f'max_tokens_{project_id}')
+        temperature = right.slider('Temperature', min_value=0.0, max_value=2.0,
                                    step=0.1, key=f'temperature_{project_id}')
         st.caption('Temperature is sent only when supported or when support is unspecified. The output limit is sent to every model.')
         for model_id in selected:

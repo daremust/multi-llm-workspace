@@ -122,3 +122,108 @@ def test_timeout_and_redirect_limit(mock_http):
 def test_plain_text(mock_http):
     mock_http(lambda request: httpx.Response(200, headers={'content-type': 'text/plain'}, text='Original\ntext'))
     assert fetch_webpage('http://example.org').content == 'Original\ntext'
+
+
+def test_article_structure_links_and_boilerplate():
+    from pathlib import Path
+    parser = webpage.ReadableHTML('https://example.org/blog/post/')
+    parser.feed((Path(__file__).parent / 'fixtures/webpage/article.html').read_text())
+    title, text = parser.extract()
+    assert title == 'Technical article & notes'
+    for expected in ['Local development — café', 'By an engineer', 'Setup', '1. Install tools',
+                     '- Keep Unicode: α × 2', '2. Run tests',
+                     'if ready:\n    run("α")\n\n    verify()', '| Device | Memory', '| GPU | 128 GB',
+                     'Figure 1. Test configuration.', 'Technical note:', 'Article footnote:',
+                     'the guide (https://example.org/blog/guide?q=1#setup)']:
+        assert expected in text
+    assert text.count('Repeat this important warning.') == 2
+    assert text.count('https://example.org/api') == 1
+    for excluded in ['Menu links', 'Site header', 'Wrong card', 'Unrelated title', 'Share this',
+                     'Hidden clone', 'Hidden copy', 'Hidden styling', 'Visitor comments', 'Site footer', 'javascript:']:
+        assert excluded not in text
+    assert 'Setup section' in text and 'Unsafe link' in text
+
+
+def test_body_fallback_preserves_short_prose_and_code():
+    from pathlib import Path
+    parser = webpage.ReadableHTML()
+    parser.feed((Path(__file__).parent / 'fixtures/webpage/fallback.html').read_text())
+    title, text = parser.extract()
+    assert title == 'Fallback'
+    assert 'A short page' in text and 'Navigation is a legitimate topic' in text
+    assert 'Related posts are discussed' in text
+    assert '  indented()\n\n  done()' in text
+    assert 'Menu' not in text and 'Site footer' not in text
+
+
+@pytest.mark.parametrize('html,expected', [
+    ('<body>Outside<main><article><a href="/card">Tiny card</a></article><p>Main text</p></main></body>', 'Main text'),
+    ('<body>Outside<div role="main"><h1>Short main</h1></div></body>', 'Short main'),
+    ('<body><main hidden>Hidden</main><p>Fallback text</p></body>', 'Fallback text'),
+    ('<body><main><p>One<p>Two<br/>Three</main><nav>Menu</nav></body>', 'One\nTwo\nThree'),
+    ('<body><article><p>' + 'Substantive prose. ' * 20 + '</p></article><article>Small card</article></body>', 'Substantive prose.'),
+    ('<body><main><div>' * 500 + 'Deep content', 'Deep content'),
+])
+def test_region_selection_and_imperfect_html(html, expected):
+    parser = webpage.ReadableHTML('https://example.org/page')
+    parser.feed(html)
+    _, text = parser.extract()
+    assert expected in text
+    assert 'Outside' not in text and 'Hidden' not in text and 'Menu' not in text
+
+
+def test_article_links_resolve_against_redirect_target(mock_http):
+    def handler(request):
+        if request.url.path == '/start':
+            return httpx.Response(302, headers={'location': '/docs/page/'})
+        return httpx.Response(200, headers={'content-type': 'text/html'},
+                              text='<main><p>See <a href="../guide">guide</a>.</p></main>')
+    mock_http(handler)
+    assert fetch_webpage('https://example.org/start').content == 'See guide (https://example.org/docs/guide).'
+
+
+@pytest.mark.parametrize('close_taxonomy', [False, True])
+def test_verified_post_wrappers_preserve_article_and_attribution(close_taxonomy):
+    from pathlib import Path
+    html = (Path(__file__).parent / 'fixtures/webpage/nvidia-post.html').read_text()
+    if close_taxonomy:
+        # Also test biography/comments as siblings: taxonomy removal must not mask missing rules.
+        html = html.replace('    <div class="post-authors-list">', '  </div>\n    <div class="post-authors-list">')
+    parser = webpage.ReadableHTML('https://example.org/blog/post/')
+    parser.feed(html)
+    title, text = parser.extract()
+    assert title == 'Development on one machine | Technical Blog'
+    for expected in ['Development on one machine', 'Code, test, and deploy locally', 'Oct 16, 2026',
+                     'By An Engineer (https://example.org/blog/author/engineer/)',
+                     'Technical content: 128 GB, FP4, CUDA, and α.', 'Setup', '- Install tools', '- Run tests',
+                     'setup instructions (https://example.org/docs/setup)', 'Figure 1. Test configuration.',
+                     'Footnote: measurements depend on configuration.', 'AI-Generated Summary',
+                     'AI-generated content may summarize information incompletely. Verify important information.',
+                     'Learn more (https://example.org/terms/)', 'Like other models',
+                     'Tags and Comments are also programming concepts.', 'https://www.linkedin.com/company/example/']:
+        assert expected in text
+    for unwanted in ['Discuss (0)', 'twitter.com/intent', 'reddit.com/submit', 'Metadata-only category',
+                     'metadata-only', 'About the Authors', 'Biography-only prose', 'View all posts', 'Comment-only prose']:
+        assert unwanted not in text
+    assert not {'Like', 'Tags', 'Comments'} & set(text.splitlines())
+
+
+@pytest.mark.parametrize('marker', ['entry-meta-social', 'entry-meta-social-links-list', 'sticky-share-buttons',
+                                   'post--rate', 'post--comments-count', 'entry-content-author', 'entry-content-comments'])
+def test_verified_marker_exclusion_in_body_fallback(marker):
+    parser = webpage.ReadableHTML('https://example.org/')
+    parser.feed(f'<body><p>Article text</p><div class="other {marker}">Control text</div></body>')
+    assert parser.extract()[1] == 'Article text'
+
+
+@pytest.mark.parametrize('attrs,removed', [
+    ('class="card--post-attributes-secondary tags"', True),
+    ('class="tags other card--post-attributes-secondary"', True),
+    ('class="tags"', False), ('class="card--post-attributes-secondary"', False),
+    ('class="card--post-attributes-secondary" id="tags"', False),
+    ('class="entry-content-author-guide"', False), ('class="post-authors author"', False),
+])
+def test_taxonomy_requires_both_exact_classes(attrs, removed):
+    parser = webpage.ReadableHTML()
+    parser.feed(f'<body><p>Article text</p><div {attrs}>Preserved unless taxonomy</div></body>')
+    assert ('Preserved unless taxonomy' not in parser.extract()[1]) == removed

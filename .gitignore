@@ -9,6 +9,8 @@ data/
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
+*.favorites.json
+.*.favorites.json.*
 __pycache__/
 *.py[cod]
 .pytest_cache/

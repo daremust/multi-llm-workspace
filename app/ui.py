@@ -5,9 +5,9 @@ import re
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 from pydantic import SecretStr, ValidationError
 
+from app.navigation_ui import render_navigation, select_project
 from app.config import load_settings
 from app.db import (
     create_project, get_project, initialize_database, list_projects, rename_project, delete_project,
@@ -64,6 +64,7 @@ def main() -> None:
     for key in list(st.session_state):
         if workspace_state_key(key):
             st.session_state[key] = st.session_state[key]
+    render_navigation(projects)
     with st.sidebar:
         with st.container(key='sidebar_layout'):
             with st.container(key='sidebar_upper'):
@@ -80,7 +81,6 @@ def main() -> None:
                 )
 
     if st.session_state.get('project_id') is None:
-        sync_project_hash(home=True)
         with st.container(key='home_composition'):
             with st.container(key='home_hero'):
                 st.title("Multi-LLM Workspace")
@@ -100,38 +100,12 @@ def main() -> None:
         return
     render_workflow()
     st.subheader(current.name, anchor=False)
-    sync_project_hash(home=False)
     try:
         render_workspace(settings.database_path, current, settings.openrouter_api_key)
     except sqlite3.Error:
         st.error("Could not read or save workspace data. Check database permissions and try again.")
     render_help()
     render_tip()
-
-
-def sync_project_hash(*, home: bool) -> None:
-    """Mirror visible selection without routing, reloads, or new history entries.
-
-    Read Streamlit's rendered heading ID so its existing slug rules remain authoritative.
-    The observer handles the heading arriving after this zero-size component mounts.
-    """
-    st.html('<style>.st-key-project_url_sync { display: none; }</style>')
-    with st.container(key='project_url_sync'):
-        components.html("""<script>
-const home = HOME_STATE;
-const page = window.parent;
-function sync() {
-    const heading = page.document.querySelector('[data-testid="stMain"] h3[id]');
-    if (!home && !heading) return;
-    const url = new URL(page.location.href);
-    url.hash = home ? '' : heading.id;
-    if (url.href !== page.location.href) page.history.replaceState(page.history.state, '', url);
-}
-sync();
-const observer = new MutationObserver(sync);
-observer.observe(page.document.querySelector('[data-testid="stMain"]'), {childList: true, subtree: true});
-window.addEventListener('unload', () => observer.disconnect());
-</script>""".replace('HOME_STATE', 'true' if home else 'false'), height=0)
 
 
 def workspace_state_key(key: str, project_id: int | None = None) -> bool:
@@ -145,13 +119,13 @@ def workspace_state_key(key: str, project_id: int | None = None) -> bool:
 
 
 def go_home() -> None:
-    st.session_state['project_id'] = None
+    select_project(st.session_state, None)
     st.session_state['project_selector'] = None
     st.session_state.pop('project_action', None)
 
 
 def open_selected_project() -> None:
-    st.session_state['project_id'] = st.session_state['project_selector']
+    select_project(st.session_state, st.session_state['project_selector'])
     st.session_state.pop('project_action', None)
 
 
@@ -181,14 +155,12 @@ def render_project_controls(database_path: Path, projects: list[Project]) -> Non
                 st.error('Could not save the project. Check database permissions and try again.')
             else:
                 st.session_state['creating_project'] = False
-                st.session_state['project_id'] = project.id
+                select_project(st.session_state, project.id)
                 st.session_state['project_selector'] = project.id
                 st.session_state.pop('project_action', None)
                 st.rerun()
     names = {project.id: project.name for project in projects}
-    # Preserve the existing initial opening behavior, but explicit Home stays Home.
-    if 'project_id' not in st.session_state:
-        st.session_state['project_id'] = projects[0].id if projects else None
+    # Navigation resolves the browser fragment before project controls render.
     if st.session_state['project_id'] is not None and st.session_state['project_id'] not in names:
         go_home()
     if st.session_state.get('project_selector') != st.session_state['project_id']:
@@ -238,7 +210,7 @@ def render_project_controls(database_path: Path, projects: list[Project]) -> Non
                     if workspace_state_key(key, pid):
                         del st.session_state[key]
                 # The selector has already rendered. Reset its value on the next run.
-                st.session_state['project_id'] = None
+                select_project(st.session_state, None)
                 st.session_state.pop('project_action', None)
                 st.rerun()
         if st.button('Cancel deletion'):
@@ -318,13 +290,17 @@ def render_workspace(database_path: Path, project: Project, api_key: SecretStr |
     task_summary = (summary(project.task, 64) or "Not configured") + " · " + project.output_format
     with workspace_section("02  TASK & OUTPUT", task_summary, project.id, "task"):
         st.caption("Saved state is shown above. Save task and format together before generating with edits.")
-        task = st.text_area("Task / instructions", value=project.task, key=f"{prefix}_task", height=150)
-        output = st.selectbox("Output format", OUTPUT_FORMATS,
-                              index=OUTPUT_FORMATS.index(project.output_format), key=f"{prefix}_format")
+        if f"{prefix}_task" not in st.session_state:
+            st.session_state[f"{prefix}_task"] = project.task
+        task = st.text_area("Task / instructions", key=f"{prefix}_task", height=150)
+        if f"{prefix}_format" not in st.session_state:
+            st.session_state[f"{prefix}_format"] = project.output_format
+        output = st.selectbox("Output format", OUTPUT_FORMATS, key=f"{prefix}_format")
         custom = ''
         if output == 'Custom':
-            custom = st.text_area("Custom format / instructions", value=project.custom_output_format,
-                                  key=f"{prefix}_custom")
+            if f"{prefix}_custom" not in st.session_state:
+                st.session_state[f"{prefix}_custom"] = project.custom_output_format
+            custom = st.text_area("Custom format / instructions", key=f"{prefix}_custom")
         if st.button("Save task and format", key=f"{prefix}_save"):
             try:
                 save_project_inputs(database_path, project.id, task, output, custom)

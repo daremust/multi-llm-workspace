@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+import json
 from time import perf_counter
 from typing import Any
 
@@ -130,6 +131,19 @@ def normalize_completion(data: Any, latency_ms: int) -> Completion:
     choices = data.get('choices')
     first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
     message = first.get('message') if isinstance(first.get('message'), dict) else {}
+    annotations = message.get('annotations')
+    if isinstance(annotations, list):
+        # Preserve JSON annotations without interpreting marker numbers or offsets.
+        # Bad optional metadata must not discard an otherwise usable response.
+        retained = []
+        for annotation in annotations:
+            if not isinstance(annotation, dict):
+                continue
+            try:
+                retained.append(json.loads(json.dumps(annotation, allow_nan=False)))
+            except (TypeError, ValueError):
+                continue
+        common['metadata']['annotations'] = retained
     text = optional_text(message.get('content'))
     finish = optional_text(first.get('finish_reason'))
     if text is None or finish == 'error':

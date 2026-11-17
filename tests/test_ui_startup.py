@@ -34,10 +34,16 @@ from app.config import load_settings
 from app.db import initialize_database, create_project
 path = load_settings().database_path
 initialize_database(path)
-create_project(path, "Startup regression")
+project = create_project(path, "Startup regression")
 import app.ui  # Import the actual entry point before executing it as a script.
-from streamlit.testing.v1 import AppTest
-app = AppTest.from_file(str(Path("app/ui.py").resolve())).run()
+sys.path.insert(0, str(Path('tests').resolve()))
+from pytest import MonkeyPatch
+from apptest_compat import install_registry_adapter
+from navigation_support import browser_app
+patcher = MonkeyPatch()
+install_registry_adapter(patcher)
+app = browser_app(str(Path("app/ui.py").resolve()), project.id).run()
+patcher.undo()
 assert not app.exception, str(app.exception)
 assert app.subheader[0].value == "Startup regression"
 assert any(e.label.startswith("03  GENERATE") for e in app.expander)

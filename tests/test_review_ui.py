@@ -1,3 +1,4 @@
+from navigation_support import browser_app
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,31 @@ from app.review import get_primary_response, list_versions
 from test_review import counts, seed_run
 
 UI_PATH = Path(__file__).resolve().parents[1] / 'app' / 'ui.py'
+
+
+@pytest.mark.parametrize('finish_reason', ['length', 'stop', None, 'LENGTH'])
+def test_compare_output_limit_warning(review_environment, finish_reason):
+    from app.db import connect
+
+    project = create_project(review_environment, 'Output limit warning')
+    run = seed_run(review_environment, project.id, 2)
+    requests = list_run_requests(review_environment, run)
+    with connect(review_environment) as connection:
+        for request, model in zip(requests, ['anthropic/test', 'openai/test']):
+            connection.execute('UPDATE responses SET finish_reason = ? WHERE id = ?',
+                               (finish_reason, request.response.id))
+            connection.execute('UPDATE run_requests SET requested_model = ? WHERE id = ?',
+                               (model, request.id))
+    before = list_run_requests(review_environment, run)
+    before_counts = counts(review_environment)
+    app = browser_app(str(UI_PATH), project.id).run()
+    assert not app.exception
+    message = 'Output limit reached — this response may be incomplete.'
+    assert sum(w.value == message for w in app.warning) == (2 if finish_reason == 'length' else 0)
+    assert all(any(t.value == request.response.text for t in app.text) for request in before)
+    assert len([e for e in app.expander if e.label == 'Details']) == 2
+    assert list_run_requests(review_environment, run) == before
+    assert counts(review_environment) == before_counts
 
 
 def widget(elements, label):
@@ -31,7 +57,7 @@ def test_comparison_single_row_and_no_automatic_mutations(review_environment, co
     project = create_project(review_environment, 'Comparison')
     seed_run(review_environment, project.id, count, failed=count >= 3)
     before = counts(review_environment)
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH), project.id).run()
     assert not app.exception
     # One horizontal block with exactly N columns, rather than rows of two.
     comparison_rows = [block for block in app.get('flex_container')
@@ -53,7 +79,7 @@ def test_full_review_reruns_switching_and_reopen(review_environment):
     first = create_project(review_environment, 'First')
     second = create_project(review_environment, 'Second')
     run_id = seed_run(review_environment, first.id, 3, failed=True)
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH), first.id).run()
     app.sidebar.selectbox[0].select(first.id).run()
     assert not app.exception
     widget(app.selectbox, 'Human rating').select(4).run()
@@ -86,7 +112,7 @@ def test_full_review_reruns_switching_and_reopen(review_environment):
     widget(app.button, 'Set version as current').click().run()
     assert get_project(review_environment, first.id).current_version_id == version1
     before = counts(review_environment)
-    reopened = AppTest.from_file(str(UI_PATH)).run()
+    reopened = browser_app(str(UI_PATH), first.id).run()
     reopened.sidebar.selectbox[0].select(first.id).run()
     assert not reopened.exception
     assert get_primary_response(review_environment, first.id).id == response.id
@@ -96,12 +122,35 @@ def test_full_review_reruns_switching_and_reopen(review_environment):
     assert counts(review_environment) == before
 
 
+def test_primary_switch_preserves_separate_final_drafts(review_environment):
+    project = create_project(review_environment, 'Primary drafts')
+    run = seed_run(review_environment, project.id, 2)
+    first, second = [r.response for r in list_run_requests(review_environment, run)]
+    app = browser_app(str(UI_PATH), project.id).run()
+    next(b for b in app.button if b.key == f'primary_{first.id}').click().run()
+    assert widget(app.text_area, 'Working copy').value == first.text
+    widget(app.text_area, 'Working copy').set_value('First unsaved draft').run()
+    next(b for b in app.button if b.key == f'primary_{second.id}').click().run()
+    assert widget(app.text_area, 'Working copy').value == second.text
+    widget(app.text_area, 'Working copy').set_value('Second unsaved draft').run()
+    next(b for b in app.button if b.key == f'primary_{first.id}').click().run()
+    app.run()
+    assert not app.exception
+    assert widget(app.text_area, 'Working copy').value == 'First unsaved draft'
+    next(b for b in app.button if b.key == f'primary_{second.id}').click().run()
+    assert widget(app.text_area, 'Working copy').value == 'Second unsaved draft'
+    assert not list_versions(review_environment, project.id)
+    fresh = browser_app(str(UI_PATH), project.id).run()
+    assert not fresh.exception
+    assert widget(fresh.text_area, 'Working copy').value == second.text
+
+
 def test_review_rerun_uses_loaded_catalog_without_network(review_environment):
     from app.openrouter import parse_catalog
 
     project = create_project(review_environment, 'Offline review')
     seed_run(review_environment, project.id, 1)
-    app = AppTest.from_file(str(UI_PATH))
+    app = browser_app(str(UI_PATH), project.id)
     app.session_state['loaded_catalog'] = parse_catalog({'data': []})
     app.run()
     widget(app.button, 'Set as primary').click().run()
@@ -113,7 +162,7 @@ def test_review_rerun_uses_loaded_catalog_without_network(review_environment):
 def test_switch_current_version_resets_working_copy(review_environment):
     project = create_project(review_environment, 'Version sync')
     seed_run(review_environment, project.id, 1)
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH), project.id).run()
     widget(app.button, 'Set as primary').click().run()
     widget(app.text_area, 'Working copy').set_value('VERSION 1: London').run()
     widget(app.button, 'Save version').click().run()
@@ -155,7 +204,7 @@ def test_workspace_hierarchy_keeps_review_state_on_reruns(review_environment):
     select_primary_response(review_environment, project.id, response.id)
     version = save_review_version(review_environment, project.id, response.id, 'Saved version')
     before = counts(review_environment)
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH), project.id).run()
     sections = [e for e in app.main.expander if e.label.startswith(
         ('01  ', '02  ', '03  ', '04  ', 'OPTIONAL COMPUTE', '05  '))]
     assert [e.label.split(' · ')[0] for e in sections] == [
@@ -186,7 +235,7 @@ def test_tip_dismissal_preserves_draft_and_review_state(review_environment):
     response = list_run_requests(review_environment, run)[0].response
     select_primary_response(review_environment, project.id, response.id)
     version = save_review_version(review_environment, project.id, response.id, 'Saved version')
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH), project.id).run()
     assert app.subheader[0].value == 'Actual project name'
     widget(app.text_area, 'Working copy').set_value('Unsaved working text').run()
     before = counts(review_environment)
@@ -210,7 +259,7 @@ def test_home_and_rename_preserve_edits_parameters_and_data(review_environment):
     save_project_inputs(review_environment, project.id, 'Saved task', 'Custom', 'Saved format')
     before = get_project(review_environment, project.id)
     graph = project_graph(review_environment, project.id)
-    app = AppTest.from_file(str(UI_PATH))
+    app = browser_app(str(UI_PATH), project.id)
     app.session_state['loaded_catalog'] = parse_catalog({'data': [model_entry('author/free', '0', '0')]})
     app.run()
     widget(app.text_area, 'Working copy').set_value('Unsaved working text').run()
@@ -249,7 +298,7 @@ def test_confirmed_delete_returns_home_and_preserves_other_project(review_enviro
     other = seed_project_graph(review_environment, 'Keep')
     selected = seed_project_graph(review_environment, 'Delete')
     graph = project_graph(review_environment, other.id)
-    app = AppTest.from_file(str(UI_PATH)).run()
+    app = browser_app(str(UI_PATH), selected.id).run()
     widget(app.sidebar.button, 'Delete project').click().run()
     assert get_project(review_environment, selected.id) is not None
     assert any('all its local data/history' in w.value for w in app.warning)
@@ -264,3 +313,44 @@ def test_confirmed_delete_returns_home_and_preserves_other_project(review_enviro
     assert project_graph(review_environment, other.id) == graph
     assert [p.id for p in list_projects(review_environment)] == [other.id]
     assert not any('Delete (#' in option for option in widget(app.sidebar.selectbox, 'Open project').options)
+
+
+@pytest.mark.parametrize('already_current', [False, True])
+def test_restore_cross_response_editor_and_fresh_session(review_environment, already_current):
+    from app.review import select_primary_response, save_review_version
+    from app.review_ui import draft_state_key
+
+    project = create_project(review_environment, 'Cross response restore')
+    run = seed_run(review_environment, project.id, 2)
+    first, second = [r.response for r in list_run_requests(review_environment, run)]
+    select_primary_response(review_environment, project.id, first.id)
+    target = save_review_version(review_environment, project.id, first.id, 'Restored text')
+    select_primary_response(review_environment, project.id, second.id)
+    if not already_current:
+        save_review_version(review_environment, project.id, second.id, 'Other text')
+    before = counts(review_environment)
+    app = browser_app(str(UI_PATH), project.id)
+    draft = draft_state_key(project.id, first.id, target)
+    app.session_state[draft] = 'Stale cached draft'
+    app.session_state[f'editor_{draft}'] = 'Stale widget draft'
+    app.run()
+    widget(app.selectbox, 'Saved version').select(target).run()
+    assert not widget(app.button, 'Set version as current').disabled
+    widget(app.button, 'Set version as current').click().run()
+    assert not app.exception
+    assert widget(app.text_area, 'Working copy').value == 'Restored text'
+    assert any(f'Starting from version #{target}.' in c.value for c in app.caption)
+    assert get_primary_response(review_environment, project.id).id == first.id
+    assert counts(review_environment)[0] == before[0]
+    reopened = browser_app(str(UI_PATH), project.id).run()
+    assert not reopened.exception
+    assert widget(reopened.text_area, 'Working copy').value == 'Restored text'
+    after_restore = counts(review_environment)
+    widget(reopened.button, 'Finish / Save').click().run()
+    assert counts(review_environment) == after_restore
+    widget(reopened.text_area, 'Working copy').set_value('Edited restored text').run()
+    widget(reopened.button, 'Save version').click().run()
+    version = list_versions(review_environment, project.id)[0]
+    assert version.text == 'Edited restored text'
+    assert version.derived_from_response_id == first.id
+    assert version.derived_from_version_id == target

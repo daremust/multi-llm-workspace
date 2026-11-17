@@ -2,7 +2,7 @@
 
 import ipaddress
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
@@ -48,43 +48,182 @@ def validate_url(url: str) -> tuple[httpx.URL, str]:
         raise WebpageError('Enter a valid, resolvable public HTTP/HTTPS URL.') from exc
 
 
+@dataclass
+class _Element:
+    tag: str
+    attrs: dict[str, str]
+    children: list = field(default_factory=list)
+
+
 class ReadableHTML(HTMLParser):
-    """Extract visible text without scripts, styles, navigation, or forms."""
+    """Conservative structural extraction, without CSS rendering or network access."""
 
-    ignored = {'script', 'style', 'noscript', 'svg', 'nav', 'footer', 'form', 'template'}
-    blocks = {'p', 'div', 'article', 'section', 'main', 'br', 'li', 'h1', 'h2', 'h3', 'h4', 'tr'}
+    ignored = {'script', 'style', 'noscript', 'svg', 'nav', 'form', 'template'}
+    void = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'}
+    boilerplate = {'related-posts', 'related-articles', 'social-share', 'share-buttons',
+                   'sharing-tools', 'cookie-banner', 'cookie-consent', 'site-header',
+                   'site-footer', 'site-navigation', 'comments', 'comment-list',
+                   # Verified post controls; deliberately exclude neither bylines nor generic authors/tags.
+                   'entry-meta-social', 'entry-meta-social-links-list', 'sticky-share-buttons',
+                   'post--rate', 'post--comments-count', 'entry-content-author', 'entry-content-comments'}
+    blocks = {'p', 'div', 'article', 'section', 'main', 'header', 'footer', 'aside',
+              'blockquote', 'figure', 'figcaption', 'caption', 'ul', 'ol', 'dl', 'dt', 'dd',
+              'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'tr', 'hr'}
 
-    def __init__(self):
+    def __init__(self, base_url: str = ''):
         super().__init__(convert_charrefs=True)
-        self.skip: list[str] = []
-        self.in_title = False
-        self.title: list[str] = []
-        self.parts: list[str] = []
+        self.base_url = base_url
+        self.root = _Element('document', {})
+        self.stack = [self.root]
 
     def handle_starttag(self, tag, attrs):
-        if tag in self.ignored:
-            self.skip.append(tag)
-        if tag == 'title':
-            self.in_title = True
-        if not self.skip and tag in self.blocks:
-            self.parts.append('\n')
+        # Recover common omitted paragraph/list-item end tags without swallowing siblings.
+        if tag in {'p', 'li'} and self.stack[-1].tag == tag:
+            self.stack.pop()
+        node = _Element(tag, {key: value or '' for key, value in attrs})
+        self.stack[-1].children.append(node)
+        if tag not in self.void:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in self.void:
+            self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
-        if self.skip:
-            if tag == self.skip[-1]:
-                self.skip.pop()
-            return
-        if tag == 'title':
-            self.in_title = False
-        if tag in self.blocks:
-            self.parts.append('\n')
+        for index in range(len(self.stack) - 1, 0, -1):
+            if self.stack[index].tag == tag:
+                del self.stack[index:]
+                break
 
     def handle_data(self, data):
-        if not self.skip:
-            if self.in_title:
-                self.title.append(data)
+        self.stack[-1].children.append(data.replace('\x00', '\ufffd'))
+
+    def _excluded(self, node, in_article):
+        attrs = node.attrs
+        markers = set((attrs.get('class', '') + ' ' + attrs.get('id', '')).lower().split())
+        classes = set(attrs.get('class', '').lower().split())
+        taxonomy = {'card--post-attributes-secondary', 'tags'} <= classes
+        role = attrs.get('role', '').lower()
+        style = ''.join(attrs.get('style', '').lower().split())
+        return (node.tag in self.ignored or 'hidden' in attrs or attrs.get('aria-hidden', '').lower() == 'true'
+                or 'display:none' in style or 'visibility:hidden' in style
+                or bool(markers & self.boilerplate) or taxonomy or role == 'navigation'
+                or (not in_article and (node.tag == 'footer' or role in {'banner', 'contentinfo'})))
+
+    def _events(self, root, *, include_metadata=True):
+        # Iterative traversal also tolerates deeply nested, imperfect HTML.
+        pending = [(root, False, False)]
+        while pending:
+            node, closing, in_article = pending.pop()
+            if isinstance(node, str):
+                yield 'text', node
+                continue
+            if closing:
+                yield 'end', node
+                continue
+            in_article = in_article or node.tag in {'article', 'main'} or node.attrs.get('role') == 'main'
+            if self._excluded(node, in_article) or (not include_metadata and node.tag in {'head', 'title'}):
+                continue
+            yield 'start', node
+            pending.append((node, True, in_article))
+            pending.extend((child, False, in_article) for child in reversed(node.children))
+
+    def _link(self, href):
+        if not href or href.startswith('#'):
+            return ''
+        try:
+            url = urljoin(self.base_url, href)
+            parsed = urlsplit(url)
+            if parsed.scheme in {'http', 'https'} and parsed.hostname and not parsed.username and not parsed.password:
+                return url
+        except ValueError:
+            pass
+        return ''
+
+    def _render(self, root, *, include_metadata=False):
+        parts = []
+        pre = 0
+        protected = {}
+        pre_start = 0
+        links = []
+        lists = []
+        for event, node in self._events(root, include_metadata=include_metadata):
+            if event == 'text':
+                parts.append(node if pre else ' '.join(node.split()) if not node.isspace() else ' ')
+                # Preserve word separation around inline elements.
+                if not pre and node and not node.isspace():
+                    parts[-1] = (' ' if node[0].isspace() else '') + parts[-1] + (' ' if node[-1].isspace() else '')
+                continue
+            tag = node.tag
+            if event == 'start':
+                if tag in self.blocks or tag in {'pre', 'li', 'br'}:
+                    parts.append('\n')
+                if tag == 'pre':
+                    if not pre:
+                        pre_start = len(parts)
+                    pre += 1
+                if tag in {'ul', 'ol'}:
+                    lists.append([tag, 0])
+                if tag == 'li':
+                    if lists:
+                        lists[-1][1] += 1
+                    parts.append((f'{lists[-1][1]}. ' if lists and lists[-1][0] == 'ol' else '- '))
+                if tag in {'td', 'th'}:
+                    parts.append(' | ')
+                if tag == 'a':
+                    links.append((len(parts), self._link(node.attrs.get('href', ''))))
             else:
-                self.parts.append(data)
+                if tag == 'a' and links:
+                    start, url = links.pop()
+                    if url and ''.join(parts[start:]).strip() != url:
+                        parts.append(f' ({url})')
+                if tag in {'ul', 'ol'} and lists:
+                    lists.pop()
+                if tag == 'pre':
+                    pre -= 1
+                    if not pre:
+                        # A private placeholder keeps code whitespace out of prose normalization.
+                        marker = f'\x00PRE{len(protected)}\x00'
+                        protected[marker] = ''.join(parts[pre_start:]).strip('\n')
+                        parts[pre_start:] = [marker]
+                if tag in self.blocks or tag in {'pre', 'li'}:
+                    parts.append('\n')
+        # Ordinary HTML whitespace was normalized before assembly. Keep code indentation.
+        lines = [line.strip() for line in ''.join(parts).splitlines() if line.strip()]
+        return '\n'.join(protected.get(line, line) for line in lines)
+
+    def extract(self) -> tuple[str, str]:
+        title = ''
+        articles, mains, bodies = [], [], []
+        for event, node in self._events(self.root):
+            if event != 'start':
+                continue
+            if node.tag == 'title' and not title:
+                title = ' '.join(self._render(node, include_metadata=True).split())
+            if node.tag == 'article':
+                # Avoid selecting a tiny related-card article over the page's main content.
+                link_depth = 0
+                size = 0
+                for kind, child in self._events(node):
+                    if kind == 'text':
+                        if not link_depth:
+                            size += len(' '.join(child.split()))
+                    elif child.tag == 'a':
+                        link_depth += 1 if kind == 'start' else -1
+                if size >= 200:
+                    articles.append((size, node))
+            if node.tag == 'main' or node.attrs.get('role') == 'main':
+                mains.append(node)
+            if node.tag == 'body':
+                bodies.append(node)
+        if articles:
+            selected = max(articles, key=lambda item: item[0])[1]
+        else:
+            selected = next((node for node in mains if self._render(node).strip()), None)
+            selected = selected or next(iter(bodies), self.root)
+        # Document title is metadata, never duplicate article body text.
+        return title, self._render(selected)
 
 
 def fetch_webpage(url: str) -> Webpage:
@@ -117,11 +256,9 @@ def fetch_webpage(url: str) -> Webpage:
                     text = chunks.decode(response.encoding or 'utf-8', errors='replace')
                     title = ''
                     if content_type != 'text/plain':
-                        parser = ReadableHTML()
+                        parser = ReadableHTML(str(target))
                         parser.feed(text)
-                        title = ' '.join(''.join(parser.title).split())
-                        text = '\n'.join(line for part in ''.join(parser.parts).splitlines()
-                                         if (line := ' '.join(part.split())))
+                        title, text = parser.extract()
                     if not text.strip():
                         raise WebpageError('No readable text was found. Paste the source text instead.')
                     return Webpage(original, str(target), title, text)
